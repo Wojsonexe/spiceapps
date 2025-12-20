@@ -18,6 +18,8 @@
       
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="8.0.11" />
       
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.1" />
+      
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.11" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="7.1.2" />
   </ItemGroup>
@@ -26,7 +28,6 @@
     <Folder Include="Data\Migrations\" />
     <Folder Include="ExternalApis\" />
     <Folder Include="Repositories\" />
-    <Folder Include="Security\" />
     <Folder Include="SignalR\" />
   </ItemGroup>
 

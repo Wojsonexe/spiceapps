@@ -1,6 +1,9 @@
 using Microsoft.EntityFrameworkCore;
+using SpiceAuth.Application.Interfaces;
 using SpiceAuth.Infrastructure.Data;
+using SpiceAuth.Infrastructure.Security;
 using Serilog;
+using SpiceAuth.Infrastructure.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -36,6 +39,16 @@ builder.Services.AddDbContext<SpiceAuthDbContext>(options =>
     }
 });
 
+// Security Services
+builder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
+builder.Services.AddSingleton<IKeyManagementService, KeyManagementService>();
+builder.Services.AddSingleton<ITokenService, TokenService>();
+
+// Business Services
+builder.Services.AddScoped<IClientService, ClientService>();
+builder.Services.AddScoped<IUserService, UserService>();
+builder.Services.AddScoped<IRegistrationService, RegistrationService>();
+
 // CORS
 builder.Services.AddCors(options =>
 {
@@ -60,11 +73,10 @@ using (var scope = app.Services.CreateScope())
     
     if (app.Environment.IsDevelopment())
     {
-        // Auto-migrate in development
         await context.Database.MigrateAsync();
     }
     
-    await SpiceAuthDbContextSeed.SeedAsync(context);
+    await DbInitializer.InitializeAsync(app.Services);
 }
 
 // Configure pipeline

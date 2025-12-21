@@ -1,13 +1,12 @@
 using Microsoft.EntityFrameworkCore;
-using SpiceAuth.Application.Interfaces;
-using SpiceAuth.Infrastructure.Data;
-using SpiceAuth.Infrastructure.Security;
 using Serilog;
-using SpiceAuth.Infrastructure.Services;
+using SpiceAuth.Application.Services.Identity;
+using SpiceAuth.Application.Services.Registration;
+using SpiceAuth.Application.Services.Security;
+using SpiceAuth.Infrastructure.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Configure Serilog
 Log.Logger = new LoggerConfiguration()
     .ReadFrom.Configuration(builder.Configuration)
     .Enrich.FromLogContext()
@@ -17,94 +16,108 @@ Log.Logger = new LoggerConfiguration()
 
 builder.Host.UseSerilog();
 
-// Add services
-builder.Services.AddControllers();
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-
-// Database
-builder.Services.AddDbContext<SpiceAuthDbContext>(options =>
-{
-    var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-    options.UseNpgsql(connectionString, npgsqlOptions =>
-    {
-        npgsqlOptions.MigrationsAssembly(typeof(SpiceAuthDbContext).Assembly.FullName);
-        npgsqlOptions.EnableRetryOnFailure(3);
-    });
-    
-    if (builder.Environment.IsDevelopment())
-    {
-        options.EnableSensitiveDataLogging();
-        options.EnableDetailedErrors();
-    }
-});
-
-// Security Services
-builder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
-builder.Services.AddSingleton<IKeyManagementService, KeyManagementService>();
-builder.Services.AddSingleton<ITokenService, TokenService>();
-
-// Business Services
-builder.Services.AddScoped<IClientService, ClientService>();
-builder.Services.AddScoped<IUserService, UserService>();
-builder.Services.AddScoped<IRegistrationService, RegistrationService>();
-
-// CORS
-builder.Services.AddCors(options =>
-{
-    options.AddPolicy("AllowedOrigins", policy =>
-    {
-        var origins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() 
-                      ?? Array.Empty<string>();
-        
-        policy.WithOrigins(origins)
-              .AllowAnyHeader()
-              .AllowAnyMethod()
-              .AllowCredentials();
-    });
-});
-
-var app = builder.Build();
-
-// Seed database
-using (var scope = app.Services.CreateScope())
-{
-    var context = scope.ServiceProvider.GetRequiredService<SpiceAuthDbContext>();
-    
-    if (app.Environment.IsDevelopment())
-    {
-        await context.Database.MigrateAsync();
-    }
-    
-    await DbInitializer.InitializeAsync(app.Services);
-}
-
-// Configure pipeline
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
-
-app.UseSerilogRequestLogging();
-
-app.UseHttpsRedirection();
-
-app.UseCors("AllowedOrigins");
-
-app.UseAuthentication();
-app.UseAuthorization();
-
-app.MapControllers();
+Log.Information("Starting SpiceAuth API...");
 
 try
 {
-    Log.Information("Starting SpiceAuth application");
+    var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+
+    builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    {
+        if (builder.Environment.IsDevelopment())
+        {
+            // SQLite for development
+            options.UseSqlite(connectionString);
+        }
+        else
+        {
+            // PostgreSQL for production
+            options.UseNpgsql(connectionString);
+        }
+
+        // Enable detailed errors in development
+        if (builder.Environment.IsDevelopment())
+        {
+            options.EnableSensitiveDataLogging();
+            options.EnableDetailedErrors();
+        }
+    });
+    
+    builder.Services.AddScoped<IPasswordHasher, PasswordHasher>();
+    builder.Services.AddScoped<IIdentityService, IdentityService>();
+    builder.Services.AddScoped<IRegistrationService, RegistrationService>();
+    
+    // Register ApplicationDbContext as DbContext for services that use generic DbContext
+    builder.Services.AddScoped<DbContext>(provider => 
+        provider.GetRequiredService<ApplicationDbContext>());
+
+    builder.Services.AddControllers();
+    builder.Services.AddEndpointsApiExplorer();
+    builder.Services.AddSwaggerGen(options =>
+    {
+        options.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
+        {
+            Title = "SpiceAuth",
+            Version = "v1",
+            Description = "Enterprise Identity Provider & OAuth 2.1 Authorization Server"
+        });
+    });
+
+    builder.Services.AddCors(options =>
+    {
+        options.AddDefaultPolicy(policy =>
+        {
+            policy.AllowAnyOrigin()
+                .AllowAnyMethod()
+                .AllowAnyHeader();
+        });
+    });
+
+    builder.Services.AddRouting(options =>
+    {
+        options.LowercaseUrls = true;
+    });
+
+    var app = builder.Build();
+
+    if (app.Environment.IsDevelopment())
+    {
+        using var scope = app.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        Log.Information("Running migrations...");
+        await context.Database.MigrateAsync();
+
+        Log.Information("Seeding database...");
+        await DbInitializer.SeedAsync(context);
+
+        Log.Information("Database ready!");
+    }
+
+    if (app.Environment.IsDevelopment())
+    {
+        app.UseSwagger();
+        app.UseSwaggerUI();
+    }
+
+    app.UseSerilogRequestLogging();
+
+    app.UseHttpsRedirection();
+
+    app.UseCors();
+
+    app.UseAuthorization();
+
+    app.MapControllers();
+
+    Log.Information("SpiceAuth API started successfully on {Urls}", string.Join(", ", app.Urls));
+
     app.Run();
 }
 catch (Exception ex)
 {
-    Log.Fatal(ex, "Application terminated unexpectedly");
+    Log.Fatal(ex, "Application start-up failed");
+    throw;
 }
 finally
 {

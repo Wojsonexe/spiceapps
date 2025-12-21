@@ -1,6 +1,6 @@
-@SpiceAuth.Api_HostAddress = http://localhost:5059
+@SpiceAuth.API_HostAddress = http://localhost:5045
 
-GET {{SpiceAuth.Api_HostAddress}}/weatherforecast/
+GET {{SpiceAuth.API_HostAddress}}/weatherforecast/
 Accept: application/json
 
 ###

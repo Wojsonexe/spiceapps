@@ -1,72 +1,26 @@
-﻿####################################
-# .NET / C#
-####################################
+# .NET
 bin/
 obj/
-[Bb]uild/
-[Dd]ebug/
-[Rr]elease/
-x64/
-x86/
 *.user
 *.suo
-*.userosscache
-*.sln.docstates
-
-####################################
-# Rider / JetBrains
-####################################
-.idea/
-*.sln.iml
-
-####################################
-# Visual Studio
-####################################
-.vs/
-*.vsidx
-*.vscode/
-
-####################################
-# Logs
-####################################
-logs/
+*.cache
 *.log
 
-####################################
-# EF Core
-####################################
-**/Migrations/*.Designer.cs
-**/Migrations/*.cs
-!**/Migrations/*Snapshot.cs
+# Rider / VS
+.idea/
+.vs/
 
-# jeśli CHCESZ commitować migracje → usuń powyższe 3 linie
+# SQLite
+*.db
+*.db-shm
+*.db-wal
 
-####################################
-# App secrets / configs
-####################################
+# ASP.NET
 appsettings.Development.json
-appsettings.Local.json
-secrets.json
 
-####################################
+# Logs
+logs/
+
 # OS
-####################################
 .DS_Store
 Thumbs.db
-desktop.ini
-
-####################################
-# Test artifacts
-####################################
-TestResults/
-coverage/
-*.coverage
-*.coveragexml
-
-####################################
-# NuGet
-####################################
-packages/
-*.nupkg
-project.lock.json
-dotnet

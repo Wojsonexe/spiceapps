@@ -1,6 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
-using SpiceAuth.Domain.Entities;
+using SpiceAuth.Core.Entities.Identity;
+using SpiceAuth.Core.Entities.Security;
 
 namespace SpiceAuth.Infrastructure.Data.Configurations;
 
@@ -8,64 +9,69 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
 {
     public void Configure(EntityTypeBuilder<User> builder)
     {
-        builder.ToTable("users");
-        
         builder.HasKey(u => u.Id);
         
-        // Properties
         builder.Property(u => u.Email)
             .IsRequired()
-            .HasMaxLength(256);
-        
-        builder.Property(u => u.NormalizedEmail)
-            .IsRequired()
-            .HasMaxLength(256);
+            .HasMaxLength(255);
         
         builder.Property(u => u.Username)
             .IsRequired()
             .HasMaxLength(50);
         
+        builder.Property(u => u.FirstName)
+            .HasMaxLength(100);
+        
+        builder.Property(u => u.LastName)
+            .HasMaxLength(100);
+        
         builder.Property(u => u.PasswordHash)
-            .IsRequired()
-            .HasMaxLength(512);
-        
-        builder.Property(u => u.IsActive)
-            .IsRequired()
-            .HasDefaultValue(true);
-        
-        builder.Property(u => u.IsLocked)
-            .IsRequired()
-            .HasDefaultValue(false);
-        
-        builder.Property(u => u.FailedLoginAttempts)
-            .IsRequired()
-            .HasDefaultValue(0);
-        
-        builder.Property(u => u.CreatedAt)
-            .IsRequired();
-        
-        builder.Property(u => u.UpdatedAt)
-            .IsRequired();
-        
+            .HasMaxLength(255);
+
         // Indexes
-        builder.HasIndex(u => u.NormalizedEmail)
+        builder.HasIndex(u => u.Email)
             .IsUnique()
-            .HasDatabaseName("ix_users_normalized_email");
+            .HasDatabaseName("IX_Users_Email");
         
         builder.HasIndex(u => u.Username)
             .IsUnique()
-            .HasDatabaseName("ix_users_username");
+            .HasDatabaseName("IX_Users_Username");
         
         builder.HasIndex(u => u.IsActive)
-            .HasDatabaseName("ix_users_is_active");
+            .HasDatabaseName("IX_Users_IsActive");
         
-        builder.HasIndex(u => u.LastLoginAt)
-            .HasDatabaseName("ix_users_last_login_at");
-        
+        builder.HasIndex(u => u.CreatedAt)
+            .HasDatabaseName("IX_Users_CreatedAt");
+
         // Relationships
-        builder.HasOne(u => u.DiscordAccount)
-            .WithOne(d => d.User)
-            .HasForeignKey<DiscordAccount>(d => d.UserId)
+        builder.HasMany(u => u.ExternalIdentities)
+            .WithOne(e => e.User)
+            .HasForeignKey(e => e.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+        
+        builder.HasMany(u => u.UserRoles)
+            .WithOne(ur => ur.User)
+            .HasForeignKey(ur => ur.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+        
+        builder.HasMany(u => u.UserScopes)
+            .WithOne(us => us.User)
+            .HasForeignKey(us => us.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+        
+        builder.HasMany(u => u.RefreshTokens)
+            .WithOne()
+            .HasForeignKey(rt => rt.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+        
+        builder.HasMany(u => u.OrganizationMemberships)
+            .WithOne(om => om.User)
+            .HasForeignKey(om => om.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        builder.HasOne(u => u.MfaSettings)
+            .WithOne(m => m.User)
+            .HasForeignKey<MfaSettings>(m => m.UserId)
             .OnDelete(DeleteBehavior.Cascade);
     }
 }

@@ -1,6 +1,6 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
-using SpiceAuth.Domain.Entities;
+using SpiceAuth.Core.Entities.OAuth;
 
 namespace SpiceAuth.Infrastructure.Data.Configurations;
 
@@ -8,27 +8,34 @@ public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
 {
     public void Configure(EntityTypeBuilder<RefreshToken> builder)
     {
-        builder.ToTable("refresh_tokens");
-        builder.HasKey(t => t.Id);
+        builder.HasKey(rt => rt.Id);
         
-        builder.Property(t => t.Token).IsRequired().HasMaxLength(128);
-        builder.Property(t => t.Scope).IsRequired().HasMaxLength(500);
-        builder.Property(t => t.RevokedReason).HasMaxLength(200);
-        builder.Property(t => t.IpAddress).HasMaxLength(45);
-        builder.Property(t => t.UserAgent).HasMaxLength(500);
+        builder.Property(rt => rt.TokenHash)
+            .IsRequired()
+            .HasMaxLength(255);
         
-        builder.HasIndex(t => t.Token).IsUnique().HasDatabaseName("ix_refresh_tokens_token");
-        builder.HasIndex(t => new { t.IsRevoked, t.ExpiresAt }).HasDatabaseName("ix_refresh_tokens_cleanup");
-        builder.HasIndex(t => new { t.UserId, t.ClientId, t.IsRevoked }).HasDatabaseName("ix_refresh_tokens_user_client");
+        builder.Property(rt => rt.Scope)
+            .IsRequired()
+            .HasMaxLength(500);
+
+        // Indexes
+        builder.HasIndex(rt => rt.TokenHash)
+            .IsUnique()
+            .HasDatabaseName("IX_RefreshTokens_TokenHash");
         
-        builder.HasOne(t => t.Client)
-            .WithMany(c => c.RefreshTokens)
-            .HasForeignKey(t => t.ClientId)
-            .OnDelete(DeleteBehavior.Cascade);
+        builder.HasIndex(rt => rt.ExpiresAt)
+            .HasDatabaseName("IX_RefreshTokens_ExpiresAt");
         
-        builder.HasOne(t => t.User)
-            .WithMany(u => u.RefreshTokens)
-            .HasForeignKey(t => t.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
+        builder.HasIndex(rt => new { rt.UserId, rt.ClientId })
+            .HasDatabaseName("IX_RefreshTokens_UserId_ClientId");
+        
+        builder.HasIndex(rt => rt.IsRevoked)
+            .HasDatabaseName("IX_RefreshTokens_IsRevoked");
+
+        // Self-referencing relationship for token rotation
+        builder.HasOne(rt => rt.ParentToken)
+            .WithMany()
+            .HasForeignKey(rt => rt.ParentTokenId)
+            .OnDelete(DeleteBehavior.Restrict);
     }
 }

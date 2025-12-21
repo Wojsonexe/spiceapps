@@ -1,6 +1,6 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
-using SpiceAuth.Domain.Entities;
+using SpiceAuth.Core.Entities.Authorization;
 
 namespace SpiceAuth.Infrastructure.Data.Configurations;
 
@@ -8,22 +8,20 @@ public class UserScopeConfiguration : IEntityTypeConfiguration<UserScope>
 {
     public void Configure(EntityTypeBuilder<UserScope> builder)
     {
-        builder.ToTable("user_scopes");
+        // Composite primary key
         builder.HasKey(us => new { us.UserId, us.ScopeId });
+
+        // Indexes
+        builder.HasIndex(us => us.UserId)
+            .HasDatabaseName("IX_UserScopes_UserId");
         
-        builder.HasOne(us => us.User)
-            .WithMany(u => u.UserScopes)
-            .HasForeignKey(us => us.UserId)
-            .OnDelete(DeleteBehavior.Cascade);
+        builder.HasIndex(us => us.ScopeId)
+            .HasDatabaseName("IX_UserScopes_ScopeId");
         
-        builder.HasOne(us => us.Scope)
-            .WithMany(s => s.UserScopes)
-            .HasForeignKey(us => us.ScopeId)
-            .OnDelete(DeleteBehavior.Cascade);
+        builder.HasIndex(us => us.ExpiresAt)
+            .HasDatabaseName("IX_UserScopes_ExpiresAt");
         
-        builder.HasOne(us => us.GrantedBy)
-            .WithMany()
-            .HasForeignKey(us => us.GrantedByUserId)
-            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasIndex(us => us.GrantedAt)
+            .HasDatabaseName("IX_UserScopes_GrantedAt");
     }
 }

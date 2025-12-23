@@ -1,11 +1,16 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using SpiceAuth.Core.Entities.Identity;
 using SpiceAuth.Core.Entities.Authorization;
+using SpiceAuth.Application.Services.Security;
+
 
 namespace SpiceAuth.Infrastructure.Data;
 
 public static class DbInitializer
 {
-    public static async Task SeedAsync(ApplicationDbContext context)
+    public static async Task SeedAsync(
+        ApplicationDbContext context,
+        IPasswordHasher passwordHasher)
     {
         // Ensure database is created
         await context.Database.EnsureCreatedAsync();
@@ -193,6 +198,51 @@ public static class DbInitializer
                 }
             };
             await context.Scopes.AddRangeAsync(scopes);
+        }
+        
+        const string superUserEmail = "superuser@local.test";
+        const string superUserUsername = "superuser";
+
+        var superUser = await context.Users
+            .Include(u => u.UserRoles)
+            .FirstOrDefaultAsync(u => u.Email == superUserEmail);
+
+        if (superUser == null)
+        {
+            superUser = new User
+            {
+                Id = Guid.NewGuid(),
+                Email = superUserEmail,
+                Username = superUserUsername,
+                FirstName = "Super",
+                LastName = "User",
+                EmailConfirmed = true,
+                IsActive = true,
+                IsSuspended = false
+            };
+
+            superUser.PasswordHash =
+                passwordHasher.HashPassword("SuperUser123!");
+
+            await context.Users.AddAsync(superUser);
+            await context.SaveChangesAsync();
+        }
+        var systemRoles = await context.Roles.ToListAsync();
+
+        foreach (var role in systemRoles)
+        {
+            var hasRole = await context.UserRoles.AnyAsync(ur =>
+                ur.UserId == superUser.Id &&
+                ur.RoleId == role.Id);
+
+            if (!hasRole)
+            {
+                context.UserRoles.Add(new UserRole
+                {
+                    UserId = superUser.Id,
+                    RoleId = role.Id
+                });
+            }
         }
 
         await context.SaveChangesAsync();

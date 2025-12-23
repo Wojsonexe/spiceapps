@@ -3,7 +3,9 @@ using Serilog;
 using SpiceAuth.Application.Services.Identity;
 using SpiceAuth.Application.Services.Registration;
 using SpiceAuth.Application.Services.Security;
+using SpiceAuth.Application.Services.Token;
 using SpiceAuth.Infrastructure.Data;
+using SpiceAuth.Infrastructure.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -46,6 +48,8 @@ try
     builder.Services.AddScoped<IPasswordHasher, PasswordHasher>();
     builder.Services.AddScoped<IIdentityService, IdentityService>();
     builder.Services.AddScoped<IRegistrationService, RegistrationService>();
+    builder.Services.AddScoped<IKeyManagementService, KeyManagementService>();
+    builder.Services.AddScoped<ITokenService, TokenService>();
     
     // Register ApplicationDbContext as DbContext for services that use generic DbContext
     builder.Services.AddScoped<DbContext>(provider => 
@@ -89,7 +93,9 @@ try
         await context.Database.MigrateAsync();
 
         Log.Information("Seeding database...");
-        await DbInitializer.SeedAsync(context);
+        var passwordHasher = scope.ServiceProvider
+            .GetRequiredService<IPasswordHasher>();
+        await DbInitializer.SeedAsync(context, passwordHasher);
 
         Log.Information("Database ready!");
     }

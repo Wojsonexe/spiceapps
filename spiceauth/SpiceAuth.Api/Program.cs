@@ -4,6 +4,7 @@ using SpiceAuth.Application.Services.Identity;
 using SpiceAuth.Application.Services.Registration;
 using SpiceAuth.Application.Services.Security;
 using SpiceAuth.Application.Services.Token;
+using SpiceAuth.Core.Entities.Security;
 using SpiceAuth.Infrastructure.Data;
 using SpiceAuth.Infrastructure.Services;
 
@@ -96,6 +97,14 @@ try
         var passwordHasher = scope.ServiceProvider
             .GetRequiredService<IPasswordHasher>();
         await DbInitializer.SeedAsync(context, passwordHasher);
+        
+        var keyManagement = scope.ServiceProvider.GetRequiredService<IKeyManagementService>();
+        var activeKeys = await context.Set<SigningKey>().Where(k => k.IsActive).ToListAsync();
+        if (!activeKeys.Any())
+        {
+            Log.Information("No signing keys found, generating initial key...");
+            await keyManagement.CreateNewKeyAsync();
+        }
 
         Log.Information("Database ready!");
     }

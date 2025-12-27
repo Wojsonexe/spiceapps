@@ -12,7 +12,7 @@ public record TokenRequest
     public string? Nonce { get; init; }
 }
 
-public record TokenResponse
+public record TokenResult
 {
     public string AccessToken { get; init; } = null!;
     public string TokenType { get; init; } = "Bearer";

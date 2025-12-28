@@ -1,11 +1,13 @@
 using Microsoft.EntityFrameworkCore;
 using Serilog;
 using SpiceAuth.Application.Services.Identity;
+using SpiceAuth.Application.Services.OAuth;
 using SpiceAuth.Application.Services.Registration;
 using SpiceAuth.Application.Services.Security;
 using SpiceAuth.Application.Services.Token;
 using SpiceAuth.Core.Entities.Security;
 using SpiceAuth.Infrastructure.Data;
+using SpiceAuth.Infrastructure.Identity;
 using SpiceAuth.Infrastructure.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -51,6 +53,8 @@ try
     builder.Services.AddScoped<IRegistrationService, RegistrationService>();
     builder.Services.AddScoped<IKeyManagementService, KeyManagementService>();
     builder.Services.AddScoped<ITokenService, TokenService>();
+    builder.Services.AddScoped<IOAuthService, OAuthService>();
+    builder.Services.AddScoped<IIdentityStore, EfIdentityStore>();
     
     // Register ApplicationDbContext as DbContext for services that use generic DbContext
     builder.Services.AddScoped<DbContext>(provider => 

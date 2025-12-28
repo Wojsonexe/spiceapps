@@ -2,6 +2,8 @@
 using SpiceAuth.Core.Entities.Identity;
 using SpiceAuth.Core.Entities.Authorization;
 using SpiceAuth.Application.Services.Security;
+using SpiceAuth.Core.Entities.OAuth;
+using SpiceAuth.Core.Enums;
 
 
 namespace SpiceAuth.Infrastructure.Data;
@@ -244,6 +246,76 @@ public static class DbInitializer
                 });
             }
         }
+
+        if (!await context.Set<OAuthClient>().AnyAsync())
+        {
+            var testUser = await context.Set<User>().FirstOrDefaultAsync();
+            if (testUser == null)
+            {
+                testUser = new User
+                {
+                    Id = Guid.NewGuid(),
+                    Email = "test@example.com",
+                    Username = "testuser",
+                    PasswordHash = BCrypt.Net.BCrypt.HashPassword("Test123!"),
+                    FirstName = "Test",
+                    LastName = "User",
+                    EmailConfirmed = true,
+                    IsActive = true,
+                    IsSuspended = false,
+                    CreatedAt = DateTime.UtcNow
+                };
+                context.Set<User>().Add(testUser);
+                await context.SaveChangesAsync(); // Save to get ID
+            }
+            
+            var testClient = new OAuthClient
+            {
+                Id = Guid.NewGuid(),
+                ClientId = "test-client",
+                ClientSecretHash = Convert.ToBase64String(
+                    System.Security.Cryptography.SHA256.HashData(
+                        System.Text.Encoding.UTF8.GetBytes("test-secret"))),
+                Name = "Test Application",
+                Description = "Test OAuth 2.1 Client for development",
+                ClientType = OAuthClientType.Web,
+                RedirectUris = System.Text.Json.JsonSerializer.Serialize(new[]
+                {
+                    "http://localhost:3000/callback",
+                    "http://localhost:5173/callback",
+                    "https://oauth.pstmn.io/v1/callback" // Postman
+                }),
+                PostLogoutRedirectUris = System.Text.Json.JsonSerializer.Serialize(new[]
+                {
+                    "http://localhost:3000",
+                    "http://localhost:5173"
+                }),
+                AllowedScopes = System.Text.Json.JsonSerializer.Serialize(new[]
+                {
+                    "openid",
+                    "profile",
+                    "email",
+                    "offline_access",
+                    "read:posts",
+                    "write:posts"
+                }),
+                AllowedGrantTypes = System.Text.Json.JsonSerializer.Serialize(new[]
+                {
+                    "authorization_code",
+                    "refresh_token"
+                }),
+                RequireConsent = true,
+                RequirePkce = true,
+                AccessTokenLifetime = 900,
+                RefreshTokenLifetime = 604800,
+                IsActive = true,
+                CreatedByUserId = testUser.Id,
+                CreatedAt = DateTime.UtcNow
+            };
+            context.Set<OAuthClient>().Add(testClient);
+        }
+        
+        
 
         await context.SaveChangesAsync();
     }

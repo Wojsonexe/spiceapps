@@ -29,13 +29,13 @@ public sealed class OAuthController(
             {
                 "authorization_code" => Ok(await _oauthService.ExchangeAuthorizationCodeAsync(
                     request.Code!,
-                    Guid.Parse(request.ClientId),
+                    await ResolveClientGuidAsync(request.ClientId),
                     request.RedirectUri!,
                     request.CodeVerifier)),
-
+                
                 "refresh_token" => Ok(await _oauthService.RefreshTokenAsync(
                     request.RefreshToken!,
-                    Guid.Parse(request.ClientId))),
+                    await ResolveClientGuidAsync(request.ClientId))),
 
                 "client_credentials" => Ok(await _oauthService.ClientCredentialsAsync(
                     request.ClientId,
@@ -188,5 +188,13 @@ public sealed class OAuthController(
             // Still return 200 per RFC 7009
             return Ok();
         }
+    }
+    
+    private async Task<Guid> ResolveClientGuidAsync(string clientId)
+    {
+        var client = await _oauthService.GetClientByClientIdAsync(clientId);
+        if (client == null)
+            throw new OAuthException("invalid_client");
+        return client.Id;
     }
 }

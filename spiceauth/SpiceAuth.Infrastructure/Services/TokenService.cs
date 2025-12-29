@@ -7,6 +7,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using SpiceAuth.Application.Services.Token;
+using SpiceAuth.Core.Entities.Identity;
 using SpiceAuth.Core.Entities.OAuth;
 using SpiceAuth.Core.Entities.Security;
 
@@ -293,7 +294,7 @@ public class TokenService(
             }).ToList()
         };
     }
-
+    
     public Task<SigningKey> GetActiveSigningKeyAsync() =>
         _keyManagement.GetActiveKeyAsync();
 

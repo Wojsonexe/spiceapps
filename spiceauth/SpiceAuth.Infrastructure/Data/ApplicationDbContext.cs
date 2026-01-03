@@ -6,6 +6,7 @@ using SpiceAuth.Core.Entities.OAuth;
 using SpiceAuth.Core.Entities.Organization;
 using SpiceAuth.Core.Entities.Registration;
 using SpiceAuth.Core.Entities.Security;
+using SpiceAuth.Infrastructure.Data.Configurations;
 
 namespace SpiceAuth.Infrastructure.Data;
 
@@ -35,6 +36,10 @@ public class ApplicationDbContext  : DbContext, IApplicationDbContext
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<SecurityEvent> SecurityEvents => Set<SecurityEvent>();
     public DbSet<SigningKey> SigningKeys => Set<SigningKey>();
+    public DbSet<EmailVerificationToken> EmailVerificationTokens => Set<EmailVerificationToken>();
+    public DbSet<PasswordResetToken> PasswordResetTokens => Set<PasswordResetToken>();
+    public DbSet<LoginAttempt> LoginAttempts => Set<LoginAttempt>();
+
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -42,5 +47,8 @@ public class ApplicationDbContext  : DbContext, IApplicationDbContext
 
         // Apply all configurations from assembly
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(ApplicationDbContext).Assembly);
+        modelBuilder.ApplyConfiguration(new EmailVerificationTokenConfiguration());
+        modelBuilder.ApplyConfiguration(new PasswordResetTokenConfiguration());
+        modelBuilder.ApplyConfiguration(new LoginAttemptConfiguration());
     }
 }

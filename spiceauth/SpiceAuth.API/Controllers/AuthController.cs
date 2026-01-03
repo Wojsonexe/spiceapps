@@ -23,7 +23,10 @@ public class AuthController(IIdentityService identityService) : ControllerBase
             return BadRequest(new { error = "Email and password are required" });
         }
 
-        var response = await _identityService.AuthenticateAsync(request.Email, request.Password);
+        var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var userAgent = HttpContext.Request.Headers["User-Agent"].ToString();
+
+        var response = await _identityService.AuthenticateAsync(request.Email, request.Password, ipAddress, userAgent);
 
         if (response is { Success: false, RequiresMfa: false})
         {
@@ -63,6 +66,113 @@ public class AuthController(IIdentityService identityService) : ControllerBase
 
         var isAvailable = await _identityService.IsUsernameAvailableAsync(username);
         return Ok(new { username, available = isAvailable });
+    }
+    
+    /// <summary>
+    /// Request email verification (resend)
+    /// </summary>
+    [HttpPost("resend-verification")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult> ResendEmailVerification([FromBody] ResendVerificationRequest request)
+    {
+        var success = await _identityService.ResendEmailVerificationAsync(request.UserId);
+        
+        if (!success)
+        {
+            return BadRequest(new { error = "Unable to send verification email. Email may already be verified." });
+        }
+        
+        return Ok(new { message = "Verification email sent" });
+    }
+
+    /// <summary>
+    /// Verify email with token
+    /// </summary>
+    [HttpPost("verify-email")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult> VerifyEmail([FromBody] VerifyEmailRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Token))
+        {
+            return BadRequest(new { error = "Token is required" });
+        }
+        
+        var success = await _identityService.VerifyEmailAsync(request.Token);
+        
+        if (!success)
+        {
+            return BadRequest(new { error = "Invalid or expired verification token" });
+        }
+        
+        return Ok(new { message = "Email verified successfully" });
+    }
+
+    /// <summary>
+    /// Request password reset
+    /// </summary>
+    [HttpPost("forgot-password")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult> ForgotPassword([FromBody] ForgotPasswordRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Email))
+        {
+            return BadRequest(new { error = "Email is required" });
+        }
+        
+        var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var userAgent = HttpContext.Request.Headers["User-Agent"].ToString();
+        
+        // Always return success to prevent email enumeration
+        await _identityService.GeneratePasswordResetTokenAsync(request.Email, ipAddress, userAgent);
+        
+        return Ok(new { message = "If an account exists with this email, a password reset link has been sent." });
+    }
+
+    /// <summary>
+    /// Validate password reset token
+    /// </summary>
+    [HttpGet("validate-reset-token")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult> ValidateResetToken([FromQuery] string token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return BadRequest(new { error = "Token is required" });
+        }
+        
+        var isValid = await _identityService.ValidatePasswordResetTokenAsync(token);
+        
+        return Ok(new { valid = isValid });
+    }
+
+    /// <summary>
+    /// Reset password with token
+    /// </summary>
+    [HttpPost("reset-password")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult> ResetPassword([FromBody] ResetPasswordRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Token) || string.IsNullOrWhiteSpace(request.NewPassword))
+        {
+            return BadRequest(new { error = "Token and new password are required" });
+        }
+        
+        if (request.NewPassword.Length < 8)
+        {
+            return BadRequest(new { error = "Password must be at least 8 characters" });
+        }
+        
+        var success = await _identityService.ResetPasswordAsync(request.Token, request.NewPassword);
+        
+        if (!success)
+        {
+            return BadRequest(new { error = "Invalid or expired reset token" });
+        }
+        
+        return Ok(new { message = "Password reset successfully" });
     }
 
     /// <summary>
@@ -169,5 +279,26 @@ public record ChangePasswordRequest
 {
     public Guid UserId { get; init; }
     public string CurrentPassword { get; init; } = null!;
+    public string NewPassword { get; init; } = null!;
+}
+
+public record ResendVerificationRequest
+{
+    public Guid UserId { get; init; }
+}
+
+public record VerifyEmailRequest
+{
+    public string Token { get; init; } = null!;
+}
+
+public record ForgotPasswordRequest
+{
+    public string Email { get; init; } = null!;
+}
+
+public record ResetPasswordRequest
+{
+    public string Token { get; init; } = null!;
     public string NewPassword { get; init; } = null!;
 }

@@ -1,0 +1,116 @@
+### SpiceAuth - Email Verification & Password Reset Tests
+
+@baseUrl = http://localhost:5000
+@email = test@example.com
+@username = testuser
+@password = Password123!
+
+### 1. Create Registration Request
+POST {{baseUrl}}/api/registration/request
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "username": "{{username}}",
+  "firstName": "Test",
+  "lastName": "User",
+  "password": "{{password}}"
+}
+
+### 2. Get Pending Registrations (Admin)
+GET {{baseUrl}}/api/registration/pending
+
+### 3. Approve Registration (Admin)
+# Replace {requestId} with actual ID from step 1
+POST {{baseUrl}}/api/registration/{requestId}/approve
+Content-Type: application/json
+
+{
+  "notes": "Approved for testing"
+}
+
+### 4. Check Email Logs
+# Look in console/logs for verification email with token
+
+### 5. Verify Email
+# Replace {token} with token from email logs
+POST {{baseUrl}}/api/auth/verify-email
+Content-Type: application/json
+
+{
+  "token": "PASTE_TOKEN_HERE"
+}
+
+### 6. Try Login (should work after verification)
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "{{password}}"
+}
+
+### 7. Test Failed Login (wrong password)
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "WrongPassword123!"
+}
+
+### 8. Test Account Lockout (5 failed attempts)
+# Run this 5 times to trigger lockout
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "WrongPassword123!"
+}
+
+### 9. Request Password Reset
+POST {{baseUrl}}/api/auth/forgot-password
+Content-Type: application/json
+
+{
+  "email": "{{email}}"
+}
+
+### 10. Check Reset Token Validity
+# Replace {token} with token from email logs
+GET {{baseUrl}}/api/auth/validate-reset-token?token=PASTE_TOKEN_HERE
+
+### 11. Reset Password
+# Replace {token} with token from email logs
+POST {{baseUrl}}/api/auth/reset-password
+Content-Type: application/json
+
+{
+  "token": "PASTE_TOKEN_HERE",
+  "newPassword": "NewPassword123!"
+}
+
+### 12. Login with New Password
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "NewPassword123!"
+}
+
+### 13. Resend Email Verification
+# Replace {userId} with actual user ID
+POST {{baseUrl}}/api/auth/resend-verification
+Content-Type: application/json
+
+{
+  "userId": "00000000-0000-0000-0000-000000000000"
+}
+
+### 14. Check Username Availability
+GET {{baseUrl}}/api/auth/check-username?username={{username}}
+
+### 15. Check Email Availability
+GET {{baseUrl}}/api/auth/check-email?email={{email}}

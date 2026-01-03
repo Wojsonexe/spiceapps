@@ -59,3 +59,21 @@ public record OAuthError
     public string? ErrorUri { get; init; }
     public string? State { get; init; }
 }
+
+public record ConsentRequest
+{
+    public string ClientId { get; init; } = null!;
+    public string RedirectUri { get; init; } = null!;
+    public string Scope { get; init; } = null!;
+    public string State { get; init; } = "";
+    public string CodeChallenge { get; init; } = "";
+    public string CodeChallengeMethod { get; init; } = "";
+    public string Nonce { get; init; } = "";
+    public bool Approved { get; init; }
+}
+
+public record OAuthErrorResponse(string Error, string? ErrorDescription = null)
+{
+    public string error { get; init; } = Error;
+    public string? error_description { get; init; } = ErrorDescription;
+}

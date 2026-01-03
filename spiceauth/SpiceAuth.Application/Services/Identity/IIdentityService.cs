@@ -6,7 +6,11 @@ namespace SpiceAuth.Application.Services.Identity;
 public interface IIdentityService
 {
     // Authentication
-    Task<LoginResponse> AuthenticateAsync(string email, string password);
+    Task<LoginResponse> AuthenticateAsync(
+        string email,
+        string password,
+        string? ipAddress = null,
+        string? userAgent = null);
     Task<User?> GetUserByIdAsync(Guid userId);
     Task<User?> GetUserByEmailAsync(string email);
     Task<User?> GetUserByUsernameAsync(string username);
@@ -22,4 +26,18 @@ public interface IIdentityService
     Task<bool> IsEmailAvailableAsync(string email);
     Task<bool> IsUsernameAvailableAsync(string username);
     Task<bool> ValidatePasswordAsync(Guid userId, string password);
+    
+    Task<string> GenerateEmailVerificationTokenAsync(Guid userId, string ipAddress, string userAgent);
+    Task<bool> VerifyEmailAsync(string token);
+    Task<bool> ResendEmailVerificationAsync(Guid userId);
+    
+    // Password Reset
+    Task<string?> GeneratePasswordResetTokenAsync(string email, string ipAddress, string userAgent);
+    Task<bool> ResetPasswordAsync(string token, string newPassword);
+    Task<bool> ValidatePasswordResetTokenAsync(string token);
+    
+    // Account Lockout
+    Task RecordLoginAttemptAsync(string email, bool isSuccessful, string ipAddress, string? userAgent, string? failureReason = null);
+    Task<bool> IsAccountLockedAsync(string email);
+    Task<int> GetFailedLoginAttemptsAsync(string email, TimeSpan timeWindow);
 }

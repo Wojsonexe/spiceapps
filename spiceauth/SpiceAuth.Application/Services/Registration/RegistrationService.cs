@@ -1,22 +1,31 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using SpiceAuth.Application.DTOs.Registration;
+using SpiceAuth.Application.Services.Email;
 using SpiceAuth.Application.Services.Identity;
 using SpiceAuth.Core.Entities.Registration;
 using SpiceAuth.Core.Enums;
 
 namespace SpiceAuth.Application.Services.Registration;
 
-public sealed class RegistrationService(
-    DbContext context,
-    IIdentityService identityService,
-    ILogger<RegistrationService> logger) 
-    : IRegistrationService
+public sealed class RegistrationService : IRegistrationService
 {
-    private readonly DbContext _context = context;
-    private readonly IIdentityService _identityService = identityService;
-    private readonly ILogger<RegistrationService> _logger = logger;
+    private readonly DbContext _context;
+    private readonly IIdentityService _identityService;
+    private readonly IEmailService _emailService;
+    private readonly ILogger<RegistrationService> _logger;
 
+    public RegistrationService(
+        DbContext context,
+        IIdentityService identityService,
+        IEmailService emailService,
+        ILogger<RegistrationService> logger)
+    {
+        _context = context;
+        _identityService = identityService;
+        _emailService = emailService;
+        _logger = logger;
+    }
     public async Task<RegistrationRequest> CreateRegistrationRequestAsync(CreateRegistrationRequest request)
     {
         // Validate email is not already registered or pending
@@ -144,8 +153,9 @@ public sealed class RegistrationService(
                 approvedByUserId,
                 user.Id);
 
-            // TODO: Send approval email to user
-            // TODO: Trigger SignalR notification to user
+            await _emailService.SendRegistrationApprovedAsync(user.Email, user.Username);
+
+            await _identityService.GenerateEmailVerificationTokenAsync(user.Id, "system", "registration-approval");
 
             return true;
         }
@@ -194,6 +204,8 @@ public sealed class RegistrationService(
             reason);
 
         // TODO: Send rejection email to user
+        await _emailService.SendRegistrationRejectedAsync(request.Email, request.Username, reason);
+
         // TODO: Trigger SignalR notification to user
 
         return true;

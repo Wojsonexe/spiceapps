@@ -11,7 +11,7 @@ using SpiceAuth.Core.Enums;
 
 namespace SpiceAuth.Application.Services.OAuth;
 
-public class OAuthService(
+public partial class OAuthService(
     DbContext context,
     IIdentityStore identity,
     ITokenService tokenService,
@@ -50,7 +50,7 @@ public class OAuthService(
             throw new OAuthException("invalid_client", "Invalid client");
 
         if (!string.IsNullOrEmpty(clientSecret) &&
-            client.ClientSecretHash != HashClientSecret(clientSecret))
+            !VerifyClientSecret(clientSecret, client.ClientSecretHash))
             throw new OAuthException("invalid_client", "Invalid client secret");
     }
 
@@ -350,8 +350,7 @@ public class OAuthService(
         // If client secret provided, validate it
         if (!string.IsNullOrEmpty(clientSecret))
         {
-            // TODO: Use proper hash comparison (BCrypt)
-            return client.ClientSecretHash == HashClientSecret(clientSecret);
+            return VerifyClientSecret(clientSecret, client.ClientSecretHash);
         }
 
         return true;
@@ -614,11 +613,22 @@ public class OAuthService(
 
     private static string HashClientSecret(string secret)
     {
-        // TODO: Use BCrypt
-        using var sha256 = SHA256.Create();
-        var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(secret));
-        return Convert.ToBase64String(hash);
+        // Use BCrypt with work factor 12 (secure and reasonable performance)
+        return BCrypt.Net.BCrypt.HashPassword(secret, workFactor: 12);
     }
+    
+    private static bool VerifyClientSecret(string secret, string hash)
+    {
+        try
+        {
+            return BCrypt.Net.BCrypt.Verify(secret, hash);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
 
     private static bool ValidatePkce(string codeVerifier, string codeChallenge, string? method)
     {

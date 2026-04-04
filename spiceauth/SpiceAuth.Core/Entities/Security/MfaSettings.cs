@@ -1,6 +1,4 @@
-﻿using SpiceAuth.Core.Entities.Identity;
-
-namespace SpiceAuth.Core.Entities.Security;
+﻿namespace SpiceAuth.Core.Entities.Security;
 
 public class MfaSettings
 {
@@ -14,6 +12,4 @@ public class MfaSettings
     public DateTime? EnabledAt { get; set; }
     public DateTime? LastUsedAt { get; set; }
     
-    // Navigation
-    public User User { get; set; } = null!;
 }

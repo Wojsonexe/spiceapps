@@ -5,38 +5,53 @@ using SpiceAuth.Core.Entities.Identity;
 
 namespace SpiceAuth.API.Controllers;
 
+/// <summary>
+/// Test endpoints for development (DISABLED IN PRODUCTION)
+/// </summary>
 [ApiController]
-[Route("api/[controller]")]
+[Route("api/test")]
 public class TestController(
     IOAuthService oauthService,
-    DbContext context) : ControllerBase
+    DbContext context,
+    IWebHostEnvironment environment,
+    ILogger<TestController> logger) : ControllerBase
 {
     private readonly IOAuthService _oauthService = oauthService;
     private readonly DbContext _context = context;
+    private readonly IWebHostEnvironment _environment = environment;
+    private readonly ILogger<TestController> _logger = logger;
 
     /// <summary>
     /// Generate test authorization code (DEVELOPMENT ONLY)
     /// </summary>
     [HttpPost("generate-auth-code")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     public async Task<ActionResult<object>> GenerateAuthCode(
-        [FromQuery] string? email = "test@example.com")
+        [FromQuery] string? email = "admin@spiceauth.com")
     {
+        // 🔒 BLOCK IN PRODUCTION
+        if (!_environment.IsDevelopment())
+        {
+            _logger.LogWarning("Test endpoint accessed in non-development environment");
+            return StatusCode(403, new { error = "This endpoint is only available in development" });
+        }
+
         // Get test user
-        var user = await _context.Set<User>()
+        var user = await _context.Set<ApplicationUser>()
             .FirstOrDefaultAsync(u => u.Email == email);
 
         if (user == null)
         {
-            return NotFound(new { error = "Test user not found" });
+            return NotFound(new { error = $"User not found: {email}" });
         }
 
         // Get test client
-        var client = await _oauthService.GetClientByClientIdAsync("test-client");
+        var client = await _oauthService.GetClientByClientIdAsync("testmobileapp");
         
         if (client == null)
         {
-            return NotFound(new { error = "Test client not found" });
+            return NotFound(new { error = "Test client 'testmobileapp' not found" });
         }
 
         // Generate PKCE challenge (for testing)
@@ -54,36 +69,50 @@ public class TestController(
             nonce: Guid.NewGuid().ToString()
         );
 
+        _logger.LogInformation("Test authorization code generated for user {Email}", email);
+
         return Ok(new
         {
-            message = "Test authorization code generated",
+            message = "✅ Test authorization code generated",
             code = authCode.Code,
             code_verifier = codeVerifier,
             code_challenge = codeChallenge,
             user_id = user.Id,
+            user_email = user.Email,
             client_id = client.ClientId,
             redirect_uri = authCode.RedirectUri,
             expires_at = authCode.ExpiresAt,
             usage = new
             {
-                step1 = "Use this code in POST /oauth/token",
-                step2 = "Set grant_type=authorization_code",
-                step3 = $"Set code={authCode.Code}",
-                step4 = "Set redirect_uri=http://localhost:3000/callback",
-                step5 = "Set client_id=test-client",
-                step6 = $"Set code_verifier={codeVerifier}"
+                step1 = "POST /oauth/token",
+                parameters = new
+                {
+                    grant_type = "authorization_code",
+                    code = authCode.Code,
+                    redirect_uri = "http://localhost:3000/callback",
+                    client_id = "testmobileapp",
+                    client_secret = "testsecret123",
+                    code_verifier = codeVerifier
+                }
             }
         });
     }
 
     /// <summary>
-    /// Get test client info
+    /// Get test client info (DEVELOPMENT ONLY)
     /// </summary>
     [HttpGet("client-info")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     public async Task<ActionResult<object>> GetClientInfo()
     {
-        var client = await _oauthService.GetClientByClientIdAsync("test-client");
+        // 🔒 BLOCK IN PRODUCTION
+        if (!_environment.IsDevelopment())
+        {
+            return StatusCode(403, new { error = "This endpoint is only available in development" });
+        }
+
+        var client = await _oauthService.GetClientByClientIdAsync("testmobileapp");
         
         if (client == null)
         {
@@ -93,7 +122,7 @@ public class TestController(
         return Ok(new
         {
             client_id = client.ClientId,
-            client_secret = "test-secret",
+            client_secret = "testsecret123",
             name = client.Name,
             redirect_uris = System.Text.Json.JsonSerializer.Deserialize<string[]>(client.RedirectUris),
             allowed_scopes = System.Text.Json.JsonSerializer.Deserialize<string[]>(client.AllowedScopes),

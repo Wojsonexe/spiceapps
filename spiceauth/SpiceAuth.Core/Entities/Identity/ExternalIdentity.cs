@@ -13,5 +13,6 @@ public class ExternalIdentity : BaseEntity
     public DateTime LinkedAt { get; set; }
     
     // Navigation
-    public User User { get; set; } = null!;
+    public Guid ApplicationUserId { get; set; }
+    public ApplicationUser? ApplicationUser { get; set; }
 }

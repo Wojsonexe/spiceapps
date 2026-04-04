@@ -1,151 +1,198 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using System.Security.Claims;
 using SpiceAuth.Application.DTOs.Registration;
 using SpiceAuth.Application.Services.Registration;
+using SpiceAuth.Application.Services.Audit;
+using SpiceAuth.Core.Entities.Security;
 
 namespace SpiceAuth.API.Controllers;
 
 [ApiController]
-[Route("api/[controller]")]
-public class RegistrationController(IRegistrationService registrationService) : ControllerBase
+[Route("api/registration")]
+public class RegistrationController(
+    IRegistrationService registrationService,
+    IAuditService auditService,
+    ILogger<RegistrationController> logger) : ControllerBase
 {
     private readonly IRegistrationService _registrationService = registrationService;
+    private readonly IAuditService _auditService = auditService;
+    private readonly ILogger<RegistrationController> _logger = logger;
 
-    /// <summary>
-    /// Submit a new registration request
-    /// </summary>
+    private (Guid? id, string email) GetActor() => (
+        Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : null,
+        User.FindFirstValue(ClaimTypes.Email) ?? "unknown"
+    );
+
+    private string Ip() => HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
     [HttpPost("request")]
-    [ProducesResponseType(StatusCodes.Status201Created)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [AllowAnonymous]
     public async Task<ActionResult<RegistrationRequestDto>> CreateRegistrationRequest(
         [FromBody] CreateRegistrationRequest request)
     {
         try
         {
-            var registrationRequest = await _registrationService.CreateRegistrationRequestAsync(request);
+            _logger.LogInformation(
+                "Registration request: Email={Email}, Username={Username}, IP={IP}",
+                request.Email, request.Username, Ip());
+
+            var reg = await _registrationService.CreateRegistrationRequestAsync(request);
+
+            await _auditService.LogAsync(
+                action: AuditAction.RegistrationCreated,
+                actorEmail: request.Email,
+                resourceType: "Registration",
+                resourceId: reg.Id.ToString(),
+                resourceName: reg.Username,
+                ipAddress: Ip());
+
             var dto = new RegistrationRequestDto
             {
-                Id = registrationRequest.Id,
-                Email = registrationRequest.Email,
-                Username = registrationRequest.Username,
-                FirstName = registrationRequest.FirstName,
-                LastName = registrationRequest.LastName,
-                Status = registrationRequest.Status.ToString(),
-                RequestedAt = registrationRequest.RequestedAt
+                Id = reg.Id,
+                Email = reg.Email,
+                Username = reg.Username,
+                FirstName = reg.FirstName,
+                LastName = reg.LastName,
+                Status = reg.Status.ToString(),
+                RequestedAt = reg.RequestedAt
             };
 
-            return CreatedAtAction(
-                nameof(GetRegistrationRequest),
-                new { id = dto.Id },
-                dto);
+            return CreatedAtAction(nameof(GetRegistrationRequest), new { id = dto.Id }, dto);
         }
         catch (InvalidOperationException ex)
         {
+            _logger.LogWarning(ex, "Registration validation failed: {Message}", ex.Message);
             return BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating registration request");
+            return StatusCode(500, new { error = "An error occurred processing your registration" });
         }
     }
 
-    /// <summary>
-    /// Get a specific registration request
-    /// </summary>
     [HttpGet("{id}")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [AllowAnonymous]
     public async Task<ActionResult<RegistrationRequestDto>> GetRegistrationRequest(Guid id)
     {
         var request = await _registrationService.GetRegistrationRequestAsync(id);
-        
+
         if (request == null)
-            return NotFound();
+            return NotFound(new { error = "Registration request not found" });
 
         return Ok(request);
     }
 
-    /// <summary>
-    /// Get all pending registration requests (Admin only - TODO: Add authorization)
-    /// </summary>
     [HttpGet("pending")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
+    [Authorize(AuthenticationSchemes = "Bearer", Roles = "Admin")]
     public async Task<ActionResult<List<RegistrationRequestDto>>> GetPendingRequests()
     {
         var requests = await _registrationService.GetPendingRequestsAsync();
         return Ok(requests);
     }
 
-    /// <summary>
-    /// Get all registration requests with pagination (Admin only - TODO: Add authorization)
-    /// </summary>
     [HttpGet]
-    [ProducesResponseType(StatusCodes.Status200OK)]
+    [Authorize(AuthenticationSchemes = "Bearer", Roles = "Admin")]
     public async Task<ActionResult<List<RegistrationRequestDto>>> GetAllRequests(
         [FromQuery] int skip = 0,
         [FromQuery] int take = 50)
     {
+        if (take > 100)
+            return BadRequest(new { error = "Maximum page size is 100" });
+
         var requests = await _registrationService.GetAllRequestsAsync(skip, take);
         return Ok(requests);
     }
 
-    /// <summary>
-    /// Approve a registration request (Admin only - TODO: Add authorization)
-    /// </summary>
     [HttpPost("{id}/approve")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [Authorize(AuthenticationSchemes = "Bearer", Roles = "Admin")]
     public async Task<ActionResult> ApproveRegistration(
         Guid id,
         [FromBody] ApproveRegistrationRequest request)
     {
-        // TODO: Get current admin user ID from JWT
-        var adminUserId = Guid.NewGuid(); // TEMPORARY - will be replaced with actual auth
+        var adminUserIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrEmpty(adminUserIdClaim))
+            return Unauthorized(new { error = "Invalid authentication token" });
+
+        var adminUserId = Guid.Parse(adminUserIdClaim);
+        var (_, actorEmail) = GetActor();
 
         try
         {
-            var success = await _registrationService.ApproveRegistrationAsync(
-                id,
-                adminUserId,
-                request.Notes);
+            var reg = await _registrationService.GetRegistrationRequestAsync(id);
+            var success = await _registrationService.ApproveRegistrationAsync(id, adminUserId, request.Notes);
 
             if (!success)
-                return NotFound();
+                return NotFound(new { error = "Registration request not found or already processed" });
 
-            return Ok(new { message = "Registration approved successfully" });
+            await _auditService.LogAsync(
+                action: AuditAction.RegistrationApproved,
+                actorEmail: actorEmail,
+                actorId: adminUserId,
+                resourceType: "Registration",
+                resourceId: id.ToString(),
+                resourceName: reg?.Username,
+                ipAddress: Ip());
+
+            return Ok(new { message = "Registration approved successfully", requestId = id });
         }
-        catch (Exception ex)
+        catch (InvalidOperationException ex)
         {
             return BadRequest(new { error = ex.Message });
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error approving registration: RequestId={RequestId}", id);
+            return StatusCode(500, new { error = "An error occurred processing the approval" });
+        }
     }
 
-    /// <summary>
-    /// Reject a registration request (Admin only - TODO: Add authorization)
-    /// </summary>
     [HttpPost("{id}/reject")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [Authorize(AuthenticationSchemes = "Bearer", Roles = "Admin")]
     public async Task<ActionResult> RejectRegistration(
         Guid id,
         [FromBody] RejectRegistrationRequest request)
     {
-        // TODO: Get current admin user ID from JWT
-        var adminUserId = Guid.NewGuid(); // TEMPORARY
+        var adminUserIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrEmpty(adminUserIdClaim))
+            return Unauthorized(new { error = "Invalid authentication token" });
 
-        var success = await _registrationService.RejectRegistrationAsync(
-            id,
-            adminUserId,
-            request.Reason);
+        var adminUserId = Guid.Parse(adminUserIdClaim);
+        var (_, actorEmail) = GetActor();
 
-        if (!success)
-            return NotFound();
+        if (string.IsNullOrWhiteSpace(request.Reason))
+            return BadRequest(new { error = "Rejection reason is required" });
 
-        return Ok(new { message = "Registration rejected" });
+        try
+        {
+            var reg = await _registrationService.GetRegistrationRequestAsync(id);
+            var success = await _registrationService.RejectRegistrationAsync(id, adminUserId, request.Reason);
+
+            if (!success)
+                return NotFound(new { error = "Registration request not found or already processed" });
+
+            await _auditService.LogAsync(
+                action: AuditAction.RegistrationRejected,
+                actorEmail: actorEmail,
+                actorId: adminUserId,
+                resourceType: "Registration",
+                resourceId: id.ToString(),
+                resourceName: reg?.Username,
+                metadata: request.Reason,
+                ipAddress: Ip());
+
+            return Ok(new { message = "Registration rejected", requestId = id });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error rejecting registration: RequestId={RequestId}", id);
+            return StatusCode(500, new { error = "An error occurred processing the rejection" });
+        }
     }
 
-    /// <summary>
-    /// Get registration statistics (Admin only - TODO: Add authorization)
-    /// </summary>
     [HttpGet("statistics")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
+    [Authorize(AuthenticationSchemes = "Bearer", Roles = "Admin")]
     public async Task<ActionResult<RegistrationStatistics>> GetStatistics()
     {
         var stats = await _registrationService.GetStatisticsAsync();

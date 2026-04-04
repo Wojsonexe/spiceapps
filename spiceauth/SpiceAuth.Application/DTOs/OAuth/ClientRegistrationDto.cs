@@ -1,15 +1,5 @@
 namespace SpiceAuth.Application.DTOs.OAuth;
 
-public record RegisterClientRequest
-{
-    public string ClientName { get; init; } = null!;
-    public string? Description { get; init; }
-    public List<string> RedirectUris { get; init; } = new();
-    public List<string>? PostLogoutRedirectUris { get; init; }
-    public string ClientType { get; init; } = "web"; // web, mobile, service
-    public List<string>? Scopes { get; init; }
-}
-
 public record ClientRegistrationResponse
 {
     public string ClientId { get; init; } = null!;

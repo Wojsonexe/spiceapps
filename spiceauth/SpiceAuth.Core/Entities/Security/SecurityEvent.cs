@@ -15,6 +15,4 @@ public class SecurityEvent : BaseEntity
     public Guid? ResolvedByUserId { get; set; }
     public DateTime Timestamp { get; set; }
     
-    // Navigation
-    public User User { get; set; } = null!;
 }

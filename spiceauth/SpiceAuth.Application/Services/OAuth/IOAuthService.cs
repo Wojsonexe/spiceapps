@@ -78,4 +78,14 @@ public interface IOAuthService
     Task<ClientRegistrationResponse> RegisterClientAsync(RegisterClientRequest request, Guid createdByUserId);
     Task<bool> DeleteClientAsync(Guid clientId, Guid userId);
     Task<List<OAuthClient>> GetUserClientsAsync(Guid userId);
+    
+    Task<TokenResponse> CreateAccessAndRefreshTokensAsync(Guid userId, string clientId, string scope);
+    Task<TokenResponse?> RotateRefreshTokenAsync(string refreshToken, string clientId);
+    Task<AuthorizationCode?> ValidateAuthorizationCodeAsync(string code, string clientId, string? codeVerifier);
+    Task RevokeRefreshTokenAsync(string tokenHash);
+    
+    Task<OAuthClient> UpdateClientAsync(Guid clientInternalId, UpdateClientRequest request, Guid updatedByUserId);
+    Task<string> RotateClientSecretAsync(Guid clientInternalId, Guid requestedByUserId);
+    Task SetClientStatusAsync(Guid clientInternalId, bool isActive, Guid updatedByUserId);
+
 }

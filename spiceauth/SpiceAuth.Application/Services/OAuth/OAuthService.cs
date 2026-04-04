@@ -11,7 +11,7 @@ using SpiceAuth.Core.Enums;
 
 namespace SpiceAuth.Application.Services.OAuth;
 
-public partial class OAuthService(
+public  class OAuthService(
     DbContext context,
     IIdentityStore identity,
     ITokenService tokenService,
@@ -37,7 +37,12 @@ public partial class OAuthService(
             sub = user.Id,
             name = user.UserName,
             email = user.Email,
-            roles = user.Roles.Select(r => r.Role.Name)
+            email_verified = user.EmailConfirmed,
+            given_name = user.FirstName,
+            family_name = user.LastName,
+            picture = user.ProfilePictureUrl,
+            roles = user.UserRoles.Select(ur => ur.Role.Name).ToList()
+            
         };
     }
 
@@ -49,11 +54,17 @@ public partial class OAuthService(
         if (client == null || !client.IsActive)
             throw new OAuthException("invalid_client", "Invalid client");
 
-        if (!string.IsNullOrEmpty(clientSecret) &&
-            !VerifyClientSecret(clientSecret, client.ClientSecretHash))
-            throw new OAuthException("invalid_client", "Invalid client secret");
-    }
+        // ✅ Confidential client wymaga sekretu
+        if (client.ClientType == ClientType.Confidential)
+        {
+            if (string.IsNullOrEmpty(clientSecret) || string.IsNullOrEmpty(client.ClientSecretHash))
+                throw new OAuthException("invalid_client", "Client secret required");
 
+            if (!VerifyClientSecret(clientSecret, client.ClientSecretHash))
+                throw new OAuthException("invalid_client", "Invalid client secret");
+        }
+    }
+    
     public async Task<TokenResponse> ClientCredentialsAsync(string clientId, string clientSecret)
     {
         await ValidateClientAsync(clientId, clientSecret);
@@ -118,6 +129,67 @@ public partial class OAuthService(
     {
         return await _context.Set<AuthorizationCode>()
             .FirstOrDefaultAsync(ac => ac.Code == code);
+    }
+
+    public async Task<TokenResponse> CreateAccessAndRefreshTokensAsync(Guid userId, string clientId, string scope)
+    {
+        var client = await GetClientByClientIdAsync(clientId);
+        if (client == null)
+        {
+            throw new InvalidOperationException("Client not found");
+        }
+        
+        var redirectUris = System.Text.Json.JsonSerializer.Deserialize<List<string>>(client.RedirectUris) ?? new List<string>();
+        var redirectUri = redirectUris.FirstOrDefault() ?? "http://localhost";
+
+        var authCode = await CreateAuthorizationCodeAsync(userId, client.Id, redirectUri, scope);
+        return await ExchangeAuthorizationCodeAsync(authCode.Code, client.Id, redirectUri);
+    }
+    
+    public async Task<TokenResponse?> RotateRefreshTokenAsync(string refreshToken, string clientId)
+    {
+        try 
+        {
+            var client = await GetClientByClientIdAsync(clientId);
+            if (client == null) return null;
+        
+            return await RefreshTokenAsync(refreshToken, client.Id);
+        }
+        catch 
+        {
+            return null;
+        }
+    }
+    
+    public async Task<AuthorizationCode?> ValidateAuthorizationCodeAsync(string code, string clientId, string? codeVerifier)
+    {
+        var client = await GetClientByClientIdAsync(clientId);
+        if (client == null) return null;
+
+        var authCode = await GetAuthorizationCodeAsync(code);
+        if (authCode == null || authCode.ClientId != client.Id) return null;
+
+        // PKCE check
+        if (!string.IsNullOrEmpty(authCode.CodeChallenge) && !string.IsNullOrEmpty(codeVerifier))
+        {
+            if (!ValidatePkce(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod))
+                return null;
+        }
+
+        return authCode;
+    }
+
+    public async Task RevokeRefreshTokenAsync(string tokenHash)
+    {
+        var refreshToken = await _context.Set<RefreshToken>()
+            .FirstOrDefaultAsync(rt => rt.TokenHash == tokenHash);
+    
+        if (refreshToken != null)
+        {
+            refreshToken.IsRevoked = true;
+            await _context.SaveChangesAsync();
+            _logger.LogInformation("Revoked refresh token: {TokenHash}", tokenHash);
+        }
     }
 
     public async Task<bool> ValidateAuthorizationCodeAsync(string code, Guid clientId, string redirectUri)
@@ -494,28 +566,26 @@ public partial class OAuthService(
         var clientSecretHash = HashClientSecret(clientSecret);
 
         // Parse client type
-        if (!Enum.TryParse<OAuthClientType>(request.ClientType, true, out var clientType))
-        {
-            clientType = OAuthClientType.Web;
-        }
+        if (!Enum.TryParse<ClientType>(request.ClientType, true, out var clientType))
+            clientType = ClientType.Confidential;
 
         var client = new OAuthClient
         {
             Id = Guid.NewGuid(),
             ClientId = clientId,
-            ClientSecretHash = clientSecretHash,
-            Name = request.ClientName,
+            ClientSecretHash = clientType == ClientType.Public ? null : clientSecretHash,
+            Name = request.Name,                  
             Description = request.Description,
             ClientType = clientType,
             RedirectUris = System.Text.Json.JsonSerializer.Serialize(request.RedirectUris),
             PostLogoutRedirectUris = System.Text.Json.JsonSerializer.Serialize(
-                request.PostLogoutRedirectUris ?? new List<string>()),
+                request.PostLogoutRedirectUris ?? []),
             AllowedScopes = System.Text.Json.JsonSerializer.Serialize(
-                request.Scopes ?? new List<string> { "openid", "profile", "email" }),
+                request.AllowedScopes),           
             AllowedGrantTypes = System.Text.Json.JsonSerializer.Serialize(
                 new[] { "authorization_code", "refresh_token" }),
-            RequireConsent = true,
-            RequirePkce = clientType != OAuthClientType.Confidential,
+            RequireConsent = request.RequireConsent, 
+            RequirePkce = request.RequirePkce,
             AccessTokenLifetime = 900,
             RefreshTokenLifetime = 604800,
             IsActive = true,
@@ -531,10 +601,10 @@ public partial class OAuthService(
         return new ClientRegistrationResponse
         {
             ClientId = clientId,
-            ClientSecret = clientSecret,
+            ClientSecret = clientType == ClientType.Public ? null! : clientSecret,
             ClientName = client.Name,
             RedirectUris = request.RedirectUris,
-            AllowedScopes = request.Scopes ?? new List<string> { "openid", "profile", "email" },
+            AllowedScopes = request.AllowedScopes,
             RequiresPkce = client.RequirePkce,
             AccessTokenLifetime = client.AccessTokenLifetime,
             RefreshTokenLifetime = client.RefreshTokenLifetime,
@@ -645,5 +715,66 @@ public partial class OAuthService(
             .Replace("=", "");
 
         return computedChallenge == codeChallenge;
+    }
+    
+    public async Task<OAuthClient> UpdateClientAsync(
+        Guid clientInternalId, UpdateClientRequest request, Guid updatedByUserId)
+    {
+        var client = await GetClientByIdAsync(clientInternalId)
+            ?? throw new InvalidOperationException("Client not found");
+
+        client.Name = request.Name;
+        client.Description = request.Description;
+        client.RedirectUris = System.Text.Json.JsonSerializer.Serialize(request.RedirectUris);
+        client.PostLogoutRedirectUris = System.Text.Json.JsonSerializer.Serialize(
+            request.PostLogoutRedirectUris ?? []);
+        client.AllowedScopes = System.Text.Json.JsonSerializer.Serialize(request.AllowedScopes);
+        client.RequireConsent = request.RequireConsent;
+        client.RequirePkce = request.RequirePkce;
+        client.UpdatedAt = DateTime.UtcNow;
+
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "Updated OAuth client: {ClientId}, by user {UserId}",
+            client.ClientId, updatedByUserId);
+
+        return client;
+    }
+
+    public async Task<string> RotateClientSecretAsync(Guid clientInternalId, Guid requestedByUserId)
+    {
+        var client = await GetClientByIdAsync(clientInternalId)
+            ?? throw new InvalidOperationException("Client not found");
+
+        if (client.ClientType == ClientType.Public)
+            throw new InvalidOperationException("Public clients do not use client secrets");
+
+        var newSecret = GenerateClientSecret();
+        client.ClientSecretHash = HashClientSecret(newSecret);
+        client.UpdatedAt = DateTime.UtcNow;
+
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "Rotated client secret: {ClientId}, by user {UserId}",
+            client.ClientId, requestedByUserId);
+
+        return newSecret;
+    }
+
+    public async Task SetClientStatusAsync(Guid clientInternalId, bool isActive, Guid updatedByUserId)
+    {
+        var client = await GetClientByIdAsync(clientInternalId)
+            ?? throw new InvalidOperationException("Client not found");
+
+        client.IsActive = isActive;
+        client.UpdatedAt = DateTime.UtcNow;
+
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "Client {ClientId} status set to {Status} by user {UserId}",
+            client.ClientId, isActive ? "Active" : "Inactive", updatedByUserId);
     }
 }

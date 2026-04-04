@@ -9,6 +9,5 @@ public class UserRole
     public DateTime AssignedAt { get; set; }
     
     // Navigation properties
-    public User User { get; set; } = null!;
     public Role Role { get; set; } = null!;
 }

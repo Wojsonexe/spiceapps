@@ -34,11 +34,5 @@ public class OrganizationInvitationConfiguration : IEntityTypeConfiguration<Orga
         
         builder.HasIndex(oi => oi.IsRevoked)
             .HasDatabaseName("IX_OrganizationInvitations_IsRevoked");
-
-        // Relationships
-        builder.HasOne(oi => oi.InvitedBy)
-            .WithMany()
-            .HasForeignKey(oi => oi.InvitedByUserId)
-            .OnDelete(DeleteBehavior.Restrict);
     }
 }

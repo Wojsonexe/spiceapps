@@ -11,6 +11,5 @@ public class UserScope
     public DateTime? ExpiresAt { get; set; }
     
     // Navigation properties
-    public User User { get; set; } = null!;
     public Scope Scope { get; set; } = null!;
 }

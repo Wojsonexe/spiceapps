@@ -8,6 +8,8 @@ public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
 {
     public void Configure(EntityTypeBuilder<RefreshToken> builder)
     {
+        builder.ToTable("RefreshTokens");
+        
         builder.HasKey(rt => rt.Id);
         
         builder.Property(rt => rt.TokenHash)
@@ -17,6 +19,20 @@ public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
         builder.Property(rt => rt.Scope)
             .IsRequired()
             .HasMaxLength(500);
+
+        // ✅ FK DO AspNetUsers:
+        builder.HasOne<SpiceAuth.Core.Entities.Identity.ApplicationUser>()
+            .WithMany()
+            .HasForeignKey(rt => rt.UserId)
+            .HasConstraintName("FK_RefreshTokens_AspNetUsers_UserId")
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // ✅ FK DO OAuthClients:
+        builder.HasOne(rt => rt.Client)
+            .WithMany()
+            .HasForeignKey(rt => rt.ClientId)
+            .HasConstraintName("FK_RefreshTokens_OAuthClients_ClientId")
+            .OnDelete(DeleteBehavior.Cascade);
 
         // Indexes
         builder.HasIndex(rt => rt.TokenHash)
@@ -36,6 +52,7 @@ public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
         builder.HasOne(rt => rt.ParentToken)
             .WithMany()
             .HasForeignKey(rt => rt.ParentTokenId)
+            .HasConstraintName("FK_RefreshTokens_RefreshTokens_ParentTokenId")
             .OnDelete(DeleteBehavior.Restrict);
     }
 }

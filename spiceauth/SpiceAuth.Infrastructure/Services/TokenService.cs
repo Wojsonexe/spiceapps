@@ -149,7 +149,7 @@ public class TokenService(
         string nonce,
         string[]? audiences = null)
     {
-        var user = await _context.Set<Core.Entities.Identity.User>()
+        var user = await _context.Set<ApplicationUser>()
             .FirstOrDefaultAsync(u => u.Id == userId);
 
         if (user == null)
@@ -175,9 +175,9 @@ public class TokenService(
         var claims = new List<Claim>
         {
             new(JwtRegisteredClaimNames.Sub, userId.ToString()),
-            new(JwtRegisteredClaimNames.Email, user.Email),
+            new(JwtRegisteredClaimNames.Email, user.Email ?? string.Empty),
             new("email_verified", user.EmailConfirmed ? "true" : "false"),
-            new("preferred_username", user.Username),
+            new("preferred_username", user.UserName ?? string.Empty),
             new(
                 JwtRegisteredClaimNames.Iat,
                 new DateTimeOffset(now).ToUnixTimeSeconds().ToString(),
@@ -262,7 +262,7 @@ public class TokenService(
             }
             catch
             {
-                continue;
+                // Token validation failed, try next key
             }
         }
 
@@ -282,7 +282,7 @@ public class TokenService(
                 rsa.ImportRSAPublicKey(Convert.FromBase64String(k.PublicKey), out _);
                 var p = rsa.ExportParameters(false);
 
-                return new SpiceAuth.Core.Entities.Security.JsonWebKey
+                return new Core.Entities.Security.JsonWebKey
                 {
                     Kty = "RSA",
                     Use = "sig",

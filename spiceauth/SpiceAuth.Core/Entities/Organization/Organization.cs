@@ -15,7 +15,6 @@ public class Organization : BaseEntity
     public string? Settings { get; set; }
     
     // Navigation properties
-    public User Owner { get; set; } = null!;
     public ICollection<OrganizationMember> Members { get; set; } = new List<OrganizationMember>();
     public ICollection<OrganizationInvitation> Invitations { get; set; } = new List<OrganizationInvitation>();
 }

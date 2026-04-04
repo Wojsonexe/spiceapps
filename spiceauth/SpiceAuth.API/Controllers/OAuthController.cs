@@ -1,51 +1,201 @@
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
-using SpiceAuth.Application.DTOs.OAuth;
+using System.Collections.Concurrent;
+using System.Security.Claims;
 using System.Text.Json;
-using SpiceAuth.Application.Exceptions;
+using System.Web;
+using SpiceAuth.Application.DTOs.OAuth;
+using SpiceAuth.Application.Services.Audit;
 using SpiceAuth.Application.Services.OAuth;
+using SpiceAuth.Core.Entities.Identity;
+using SpiceAuth.Core.Entities.OAuth;
+using SpiceAuth.Core.Entities.Security;
+using SpiceAuth.Core.Enums;
 
 namespace SpiceAuth.API.Controllers;
 
 [ApiController]
-[Route("oauth")]
-public sealed class OAuthController(
-    IOAuthService oauthService,
-    ILogger<OAuthController> logger) : ControllerBase
+[Route("/api/[controller]")]
+[Authorize(AuthenticationSchemes = "Identity.Application")]
+public sealed class OAuthController : ControllerBase
 {
-    private readonly IOAuthService _oauthService = oauthService;
-    private readonly ILogger<OAuthController> _logger = logger;
+    private readonly IOAuthService _oauthService;
+    private readonly UserManager<ApplicationUser> _userManager;
+    private readonly SignInManager<ApplicationUser> _signInManager;
+    private readonly IAuditService _auditService;
+    private readonly ILogger<OAuthController> _logger;
+    private readonly IConfiguration _configuration;
 
-    // ══════════════════════════════════════════════════════════════════
-    // AUTHORIZATION ENDPOINT (RFC 6749 Section 3.1)
-    // ══════════════════════════════════════════════════════════════════
+    private static readonly ConcurrentDictionary<string, (int Attempts, DateTime LockUntil)>
+        FailedClientAuth = new();
 
-    /// <summary>
-    /// OAuth 2.1 Authorization Endpoint
-    /// Step 1: Client redirects user here to get authorization
-    /// </summary>
+    private static readonly ConcurrentDictionary<string, (int Attempts, DateTime LockUntil)>
+        FailedLoginAttempts = new();
+
+    public OAuthController(
+        IOAuthService oauthService,
+        UserManager<ApplicationUser> userManager,
+        SignInManager<ApplicationUser> signInManager,
+        IAuditService auditService,
+        ILogger<OAuthController> logger,
+        IConfiguration configuration)
+    {
+        _oauthService  = oauthService;
+        _userManager   = userManager;
+        _signInManager = signInManager;
+        _auditService  = auditService;
+        _logger        = logger;
+        _configuration = configuration;
+    }
+
+    private string Ip() => HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    private string Ua() => HttpContext.Request.Headers.UserAgent.ToString();
+
+    #region LOGIN ENDPOINTS
+
+    [HttpGet("account/login")]
+    [AllowAnonymous]
+    public IActionResult Login([FromQuery] string? returnUrl = null)
+    {
+        if (!string.IsNullOrEmpty(returnUrl) && !returnUrl.StartsWith("/"))
+        {
+            _logger.LogWarning("Invalid returnUrl rejected: {ReturnUrl}", returnUrl);
+            returnUrl = null;
+        }
+
+        return Content(LoginPage(returnUrl), "text/html");
+    }
+
+    [HttpPost("account/login")]
+    [AllowAnonymous]
+    public async Task<IActionResult> LoginPost(
+        [FromForm] LoginModel model,
+        [FromQuery] string? returnUrl = null)
+    {
+        if (!string.IsNullOrEmpty(returnUrl) && !returnUrl.StartsWith("/"))
+        {
+            _logger.LogWarning("Invalid returnUrl rejected: {ReturnUrl}", returnUrl);
+            returnUrl = null;
+        }
+
+        var clientIp = Ip();
+
+        if (FailedLoginAttempts.TryGetValue(clientIp, out var lockInfo) &&
+            lockInfo.LockUntil > DateTime.UtcNow)
+        {
+            _logger.LogWarning("Login rate limit exceeded for IP: {IP}", clientIp);
+
+            await _auditService.LogAsync(
+                action: AuditAction.LoginFailed,
+                actorEmail: model.Email,
+                resourceType: "Auth",
+                success: false,
+                failureReason: "Rate limit exceeded",
+                ipAddress: clientIp,
+                userAgent: Ua());
+
+            return Content(LoginPage(returnUrl,
+                "Zbyt wiele prób logowania. Spróbuj ponownie za kilka minut."), "text/html");
+        }
+
+        if (string.IsNullOrWhiteSpace(model.Email) || string.IsNullOrWhiteSpace(model.Password))
+            return Content(LoginPage(returnUrl, "Email i hasło są wymagane."), "text/html");
+
+        var user = await _userManager.FindByEmailAsync(model.Email);
+
+        if (user == null || !await _userManager.CheckPasswordAsync(user, model.Password))
+        {
+            FailedLoginAttempts.AddOrUpdate(clientIp,
+                (1, DateTime.UtcNow),
+                (_, old) => (old.Attempts + 1,
+                    old.Attempts >= 4 ? DateTime.UtcNow.AddMinutes(15) : old.LockUntil));
+
+            await _auditService.LogAsync(
+                action: AuditAction.LoginFailed,
+                actorEmail: model.Email,
+                resourceType: "Auth",
+                success: false,
+                failureReason: "Invalid credentials",
+                ipAddress: clientIp,
+                userAgent: Ua());
+
+            _logger.LogWarning("Failed login attempt for {Email} from {IP}", model.Email, clientIp);
+            return Content(LoginPage(returnUrl, "Nieprawidłowy email lub hasło."), "text/html");
+        }
+
+        if (!user.IsActive)
+        {
+            await _auditService.LogAsync(
+                action: AuditAction.LoginFailed,
+                actorEmail: model.Email,
+                actorId: user.Id,
+                resourceType: "Auth",
+                success: false,
+                failureReason: "Account inactive",
+                ipAddress: clientIp,
+                userAgent: Ua());
+
+            _logger.LogWarning("Login attempt for inactive user: {Email}", model.Email);
+            return Content(LoginPage(returnUrl,
+                "Konto jest nieaktywne. Skontaktuj się z administratorem."), "text/html");
+        }
+
+        FailedLoginAttempts.TryRemove(clientIp, out _);
+
+        await _signInManager.SignInAsync(user, model.RememberMe);
+
+        await _auditService.LogAsync(
+            action: AuditAction.Login,
+            actorEmail: model.Email,
+            actorId: user.Id,
+            resourceType: "Auth",
+            ipAddress: clientIp,
+            userAgent: Ua());
+
+        _logger.LogInformation("User {UserId} logged in from {IP}", user.Id, clientIp);
+
+        var decodedReturnUrl = !string.IsNullOrEmpty(returnUrl)
+            ? Uri.UnescapeDataString(returnUrl)
+            : null;
+
+        var redirectUrl = !string.IsNullOrEmpty(decodedReturnUrl) && decodedReturnUrl.StartsWith("/")
+            ? decodedReturnUrl
+            : "/api/oauth/authorize";
+
+        return Redirect(redirectUrl);
+    }
+
+    #endregion
+
+    #region AUTHORIZATION ENDPOINT (RFC 6749 § 3.1)
+
     [HttpGet("authorize")]
-    [ProducesResponseType(StatusCodes.Status302Found)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> Authorize(
-        [FromQuery(Name = "response_type")] string? responseType,
-        [FromQuery(Name = "client_id")] string? clientId,
-        [FromQuery(Name = "redirect_uri")] string? redirectUri,
-        [FromQuery] string? scope,
-        [FromQuery] string? state,
-        [FromQuery(Name = "code_challenge")] string? codeChallenge,
-        [FromQuery(Name = "code_challenge_method")]
-        string? codeChallengeMethod,
-        [FromQuery] string? nonce,
-        [FromQuery] string? prompt)
+        [FromQuery(Name = "response_type")]         string? responseType        = null,
+        [FromQuery(Name = "client_id")]             string? clientId            = null,
+        [FromQuery(Name = "redirect_uri")]          string? redirectUri         = null,
+        [FromQuery(Name = "scope")]                 string? scope               = null,
+        [FromQuery(Name = "state")]                 string? state               = null,
+        [FromQuery(Name = "code_challenge")]        string? codeChallenge       = null,
+        [FromQuery(Name = "code_challenge_method")] string? codeChallengeMethod = null,
+        [FromQuery(Name = "nonce")]                 string? nonce               = null)
     {
         try
         {
-            // Validate required parameters
-            if (string.IsNullOrWhiteSpace(responseType))
-                return BadRequest(new { error = "invalid_request", error_description = "response_type is required" });
+            var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                              ?? User.FindFirst("sub")?.Value;
 
-            if (responseType != "code")
-                return BadRequest(new { error = "unsupported_response_type", error_description = "Only 'code' is supported" });
+            if (string.IsNullOrEmpty(userIdClaim))
+            {
+                _logger.LogWarning("Authorization attempt with invalid user claims");
+                return BadRequest(new { error = "invalid_request", error_description = "User authentication is invalid" });
+            }
+
+            var userId = Guid.Parse(userIdClaim);
+
+            if (string.IsNullOrWhiteSpace(responseType) || responseType != "code")
+                return BadRequest(new { error = "unsupported_response_type", error_description = "Only 'code' response_type is supported" });
 
             if (string.IsNullOrWhiteSpace(clientId))
                 return BadRequest(new { error = "invalid_request", error_description = "client_id is required" });
@@ -53,631 +203,434 @@ public sealed class OAuthController(
             if (string.IsNullOrWhiteSpace(redirectUri))
                 return BadRequest(new { error = "invalid_request", error_description = "redirect_uri is required" });
 
+            if (string.IsNullOrWhiteSpace(state))
+            {
+                _logger.LogWarning("Authorization request without state parameter from client: {ClientId}", clientId);
+                return BadRequest(new { error = "invalid_request", error_description = "state parameter is required for CSRF protection" });
+            }
+
             var client = await _oauthService.GetClientByClientIdAsync(clientId);
             if (client == null || !client.IsActive)
             {
+                _logger.LogWarning("Authorization attempt with invalid client: {ClientId}", clientId);
                 return BadRequest(new { error = "invalid_client", error_description = "Client not found or inactive" });
             }
 
-            // Validate redirect URI
             if (!await _oauthService.ValidateRedirectUriAsync(client.Id, redirectUri))
             {
-                return BadRequest(new { error = "invalid_request", error_description = "Invalid redirect_uri" });
+                _logger.LogWarning("Invalid redirect_uri={RedirectUri} for client={ClientId}", redirectUri, clientId);
+                return BadRequest(new { error = "invalid_request", error_description = "redirect_uri is not registered for this client" });
             }
 
-            // Validate PKCE if required
-            if (client.RequirePkce)
-            {
-                if (string.IsNullOrWhiteSpace(codeChallenge))
-                {
-                    return RedirectToError(redirectUri, "invalid_request", "code_challenge is required for this client", state);
-                }
+            var requiresPkce = client.RequirePkce || client.ClientType != ClientType.Confidential;
 
-                if (codeChallengeMethod != "S256")
-                {
-                    return RedirectToError(redirectUri, "invalid_request", "code_challenge_method must be S256", state);
-                }
-            }
-            
-            // TODO: Check if user is authenticated
-            // For now, we'll simulate that user needs to login
-            var userId = GetAuthenticatedUserId();
-                
-            if (userId == null)
+            if (requiresPkce && string.IsNullOrWhiteSpace(codeChallenge))
             {
-                // Redirect to login page with return URL
-                var returnUrl = HttpContext.Request.QueryString.ToString();
-                return Redirect($"/login?returnUrl={Uri.EscapeDataString("/oauth/authorize" + returnUrl)}");
+                _logger.LogWarning("PKCE required but code_challenge missing for client: {ClientId}", clientId);
+                return RedirectToError(redirectUri, "invalid_request", "code_challenge is required for this client type", state);
             }
-            
-            // Check if user has already consented
-            var hasConsented = await _oauthService.HasUserConsentedAsync(
-                userId.Value, 
-                client.Id, 
-                scope ?? "openid profile");
 
-            if (!hasConsented && client.RequireConsent && prompt != "none")
+            if (!string.IsNullOrWhiteSpace(codeChallenge) && codeChallengeMethod != "S256")
+                return RedirectToError(redirectUri, "invalid_request", "Only S256 code_challenge_method is supported", state);
+
+            scope ??= "openid profile";
+
+            if (scope.Contains("openid") && string.IsNullOrWhiteSpace(nonce))
             {
-                // Show consent screen
-                return await ShowConsentScreen(
-                    userId.Value,
-                    client,
-                    redirectUri,
-                    scope ?? "openid profile",
-                    state,
-                    codeChallenge,
-                    codeChallengeMethod,
-                    nonce);
+                _logger.LogWarning("OpenID Connect request without nonce from client: {ClientId}", clientId);
+                return RedirectToError(redirectUri, "invalid_request", "nonce is required when using openid scope", state);
             }
-            
-            // Generate authorization code
+
+            if (client.RequireConsent && !await _oauthService.HasUserConsentedAsync(userId, client.Id, scope))
+                return ShowConsentScreen(client, redirectUri, scope, state, codeChallenge, codeChallengeMethod, nonce);
+
             var authCode = await _oauthService.CreateAuthorizationCodeAsync(
-                userId.Value,
-                client.Id,
-                redirectUri,
-                scope ?? "openid profile",
-                codeChallenge,
-                codeChallengeMethod,
-                nonce);
+                userId, client.Id, redirectUri, scope, codeChallenge, codeChallengeMethod, nonce);
 
-            // Redirect back to client with code
-            var callbackUri = BuildCallbackUri(redirectUri, authCode.Code, state);
-                
-            _logger.LogInformation(
-                "Authorization code issued for user {UserId}, client {ClientId}", 
-                userId.Value, 
-                client.Id);
+            _logger.LogInformation("Authorization code issued for UserId={UserId}, ClientId={ClientId}", userId, clientId);
 
-            return Redirect(callbackUri); 
-        } catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in authorize endpoint");
-            
-            if (!string.IsNullOrWhiteSpace(redirectUri))
-            {
-                return RedirectToError(redirectUri, "server_error", "An error occurred", state);
-            }
-            
-            return BadRequest(new { error = "server_error", error_description = "An error occurred" });
-        }
-    }
-    
-    /// <summary>
-    /// POST endpoint for consent - user grants permission
-    /// </summary>
-    [HttpPost("authorize/consent")]
-    [ProducesResponseType(StatusCodes.Status302Found)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<IActionResult> GrantConsent([FromForm] ConsentRequest request)
-    {
-        try
-        {
-            // TODO: Validate user is authenticated
-            var userId = GetAuthenticatedUserId();
-            if (userId == null)
-            {
-                return Redirect("/login");
-            }
-
-            var client = await _oauthService.GetClientByClientIdAsync(request.ClientId);
-            if (client == null)
-            {
-                return BadRequest(new { error = "invalid_client" });
-            }
-
-            if (request.Approved)
-            {
-                // Grant consent
-                await _oauthService.GrantConsentAsync(userId.Value, client.Id, request.Scope);
-
-                // Generate authorization code
-                var authCode = await _oauthService.CreateAuthorizationCodeAsync(
-                    userId.Value,
-                    client.Id,
-                    request.RedirectUri,
-                    request.Scope,
-                    request.CodeChallenge,
-                    request.CodeChallengeMethod,
-                    request.Nonce);
-
-                // Redirect with code
-                var callbackUri = BuildCallbackUri(request.RedirectUri, authCode.Code, request.State);
-                return Redirect(callbackUri);
-            }
-            else
-            {
-                // User denied consent
-                return RedirectToError(request.RedirectUri, "access_denied", "User denied consent", request.State);
-            }
+            return Redirect(BuildRedirectUri(redirectUri, authCode.Code, state));
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error processing consent");
-            return RedirectToError(request.RedirectUri, "server_error", "An error occurred", request.State);
+            _logger.LogError(ex, "Authorization endpoint error");
+            return StatusCode(500, new { error = "server_error", error_description = "An internal error occurred. Please try again." });
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════
-    // TOKEN ENDPOINT (RFC 6749 Section 3.2)
-    // ══════════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// OAuth 2.1 Token Endpoint
-    /// Step 2: Client exchanges authorization code for tokens
-    /// </summary>
-    /// [HttpPost("token")]
-    [Consumes("application/x-www-form-urlencoded")]
-    [ProducesResponseType(typeof(TokenResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<TokenResponse>> Token(
-        [FromForm(Name = "grant_type")] string? grantType,
-        [FromForm] string? code,
-        [FromForm(Name = "redirect_uri")] string? redirectUri,
-        [FromForm(Name = "client_id")] string? clientId,
-        [FromForm(Name = "client_secret")] string? clientSecret,
-        [FromForm(Name = "code_verifier")] string? codeVerifier,
-        [FromForm(Name = "refresh_token")] string? refreshToken)
+    [HttpPost("authorize/consent")]
+    public async Task<IActionResult> GrantConsent()
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(grantType))
+            var form = await Request.ReadFormAsync();
+
+            if (!form.ContainsKey("clientId") || string.IsNullOrEmpty(form["clientId"].ToString()))
+                return BadRequest(new { error = "invalid_request", error_description = "clientId is required" });
+
+            if (!form.ContainsKey("redirectUri") || string.IsNullOrEmpty(form["redirectUri"].ToString()))
+                return BadRequest(new { error = "invalid_request", error_description = "redirectUri is required" });
+
+            var approved            = form.ContainsKey("approved") && form["approved"] == "true";
+            var redirectUri         = form["redirectUri"].ToString();
+            var state               = form["state"].ToString();
+            var scope               = form["scope"].ToString();
+            var clientId            = form["clientId"].ToString();
+            var codeChallenge       = form["codeChallenge"].ToString();
+            var codeChallengeMethod = form["codeChallengeMethod"].ToString();
+            var nonce               = form["nonce"].ToString();
+
+            var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                              ?? User.FindFirst("sub")?.Value;
+
+            if (string.IsNullOrEmpty(userIdClaim))
+                return BadRequest(new { error = "invalid_request" });
+
+            var userId    = Guid.Parse(userIdClaim);
+            var userEmail = User.FindFirst(ClaimTypes.Email)?.Value ?? "unknown";
+
+            var client = await _oauthService.GetClientByClientIdAsync(clientId);
+            if (client == null)
             {
-                return BadRequest(new OAuthErrorResponse("invalid_request", "grant_type is required"));
+                _logger.LogWarning("Consent attempt for non-existent client: {ClientId}", clientId);
+                return BadRequest(new { error = "invalid_client" });
             }
 
-            if (string.IsNullOrWhiteSpace(clientId))
+            if (!await _oauthService.ValidateRedirectUriAsync(client.Id, redirectUri))
             {
-                return BadRequest(new OAuthErrorResponse("invalid_request", "client_id is required"));
+                _logger.LogWarning("Invalid redirect_uri in consent: {RedirectUri} for client: {ClientId}", redirectUri, clientId);
+                return BadRequest(new { error = "invalid_request", error_description = "redirect_uri is not registered for this client" });
+            }
+
+            if (!approved)
+            {
+                await _auditService.LogAsync(
+                    action: AuditAction.ConsentDenied,
+                    actorEmail: userEmail,
+                    actorId: userId,
+                    resourceType: "OAuth",
+                    resourceId: clientId,
+                    resourceName: client.Name,
+                    ipAddress: Ip(),
+                    userAgent: Ua());
+
+                _logger.LogInformation("User {UserId} denied consent for client {ClientId}", userId, clientId);
+                return RedirectToError(redirectUri, "access_denied", "User denied authorization", state);
+            }
+
+            await _oauthService.GrantConsentAsync(userId, client.Id, scope);
+
+            var authCode = await _oauthService.CreateAuthorizationCodeAsync(
+                userId, client.Id, redirectUri, scope, codeChallenge, codeChallengeMethod, nonce);
+
+            await _auditService.LogAsync(
+                action: AuditAction.ConsentGranted,
+                actorEmail: userEmail,
+                actorId: userId,
+                resourceType: "OAuth",
+                resourceId: clientId,
+                resourceName: client.Name,
+                metadata: JsonSerializer.Serialize(new { scope }),  // ← poprawka
+                ipAddress: Ip(),
+                userAgent: Ua());
+
+            _logger.LogInformation("Consent granted for UserId={UserId}, ClientId={ClientId}", userId, clientId);
+            return Redirect(BuildRedirectUri(redirectUri, authCode.Code, state));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Consent endpoint error");
+            return StatusCode(500, new { error = "server_error", error_description = "An internal error occurred during consent processing" });
+        }
+    }
+
+    #endregion
+
+    #region TOKEN ENDPOINT (RFC 6749 § 3.2)
+
+    [HttpPost("token")]
+    [AllowAnonymous]
+    [Consumes("application/x-www-form-urlencoded")]
+    [Produces("application/json")]
+    public async Task<ActionResult<TokenResponse>> Token(
+        [FromForm(Name = "grant_type")]    string  grantType,
+        [FromForm(Name = "code")]          string? code         = null,
+        [FromForm(Name = "refresh_token")] string? refreshToken = null,
+        [FromForm(Name = "client_id")]     string? clientId     = "",
+        [FromForm(Name = "client_secret")] string? clientSecret = null,
+        [FromForm(Name = "code_verifier")] string? codeVerifier = null,
+        [FromForm(Name = "redirect_uri")]  string? redirectUri  = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(clientId))
+                return BadRequest(new { error = "invalid_request", error_description = "client_id is required" });
+
+            if (FailedClientAuth.TryGetValue(clientId, out var lockInfo) &&
+                lockInfo.LockUntil > DateTime.UtcNow)
+            {
+                _logger.LogWarning("Client authentication rate limit exceeded: {ClientId}", clientId);
+                return StatusCode(429, new { error = "too_many_requests", error_description = "Too many failed authentication attempts. Please try again later." });
             }
 
             var client = await _oauthService.GetClientByClientIdAsync(clientId);
             if (client == null)
             {
-                return BadRequest(new OAuthErrorResponse("invalid_client", "Client not found"));
+                _logger.LogWarning("Token request for non-existent client: {ClientId}", clientId);
+                return BadRequest(new { error = "invalid_client" });
             }
 
-            return grantType switch
+            if (client.ClientType == ClientType.Confidential)
             {
-                "authorization_code" => await HandleAuthorizationCodeGrant(
-                    code, redirectUri, clientId, clientSecret, codeVerifier, client.Id),
+                if (string.IsNullOrEmpty(clientSecret))
+                    return BadRequest(new { error = "invalid_client", error_description = "client_secret is required for confidential clients" });
 
-                "refresh_token" => await HandleRefreshTokenGrant(
-                    refreshToken, clientId, clientSecret, client.Id),
+                if (!BCrypt.Net.BCrypt.Verify(clientSecret, client.ClientSecretHash))
+                {
+                    FailedClientAuth.AddOrUpdate(clientId,
+                        (1, DateTime.UtcNow),
+                        (_, old) => (old.Attempts + 1,
+                            old.Attempts >= 4 ? DateTime.UtcNow.AddMinutes(15) : old.LockUntil));
 
-                "client_credentials" => await HandleClientCredentialsGrant(
-                    clientId, clientSecret),
+                    await _auditService.LogAsync(
+                        action: AuditAction.LoginFailed,
+                        actorEmail: clientId,
+                        resourceType: "OAuth",
+                        resourceId: clientId,
+                        success: false,
+                        failureReason: "Invalid client secret",
+                        ipAddress: Ip(),
+                        userAgent: Ua());
 
-                _ => BadRequest(new OAuthErrorResponse("unsupported_grant_type",
-                    $"Grant type '{grantType}' is not supported"))
-            };
+                    _logger.LogWarning("Failed client authentication: {ClientId}", clientId);
+                    return BadRequest(new { error = "invalid_client" });
+                }
+
+                FailedClientAuth.TryRemove(clientId, out _);
+            }
+
+            if (grantType == "authorization_code")
+            {
+                if (string.IsNullOrEmpty(code))
+                    return BadRequest(new { error = "invalid_request", error_description = "code is required" });
+
+                var tokens = await _oauthService.ExchangeAuthorizationCodeAsync(
+                    code, client.Id, redirectUri ?? "", codeVerifier);
+
+                await _auditService.LogAsync(
+                    action: AuditAction.TokenIssued,
+                    actorEmail: clientId,
+                    resourceType: "OAuth",
+                    resourceId: clientId,
+                    resourceName: client.Name,
+                    metadata: """{"grant_type":"authorization_code"}""",  // ← poprawka
+                    ipAddress: Ip(),
+                    userAgent: Ua());
+
+                _logger.LogInformation("Tokens issued via authorization_code for ClientId={ClientId}", clientId);
+                return Ok(tokens);
+            }
+
+            if (grantType == "refresh_token")
+            {
+                if (string.IsNullOrEmpty(refreshToken))
+                    return BadRequest(new { error = "invalid_request", error_description = "refresh_token is required" });
+
+                var tokens = await _oauthService.RefreshTokenAsync(refreshToken, client.Id);
+
+                await _auditService.LogAsync(
+                    action: AuditAction.TokenRefreshed,
+                    actorEmail: clientId,
+                    resourceType: "OAuth",
+                    resourceId: clientId,
+                    resourceName: client.Name,
+                    metadata: """{"grant_type":"refresh_token"}""",       // ← poprawka
+                    ipAddress: Ip(),
+                    userAgent: Ua());
+
+                _logger.LogInformation("Tokens refreshed for ClientId={ClientId}", clientId);
+                return Ok(tokens);
+            }
+
+            return BadRequest(new { error = "unsupported_grant_type", error_description = $"Grant type '{grantType}' is not supported" });
         }
-        catch (OAuthException ex)
+        catch (InvalidOperationException ex)
         {
-            return BadRequest(new OAuthErrorResponse(ex.Error, ex.ErrorDescription));
+            _logger.LogWarning(ex, "Token exchange failed");
+            return BadRequest(new { error = "invalid_grant", error_description = ex.Message });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error in token endpoint");
-            return BadRequest(new OAuthErrorResponse("server_error", "An error occurred"));
+            _logger.LogError(ex, "Token endpoint error");
+            return StatusCode(500, new { error = "server_error", error_description = "An internal error occurred" });
         }
     }
-    
-    // ══════════════════════════════════════════════════════════════════
-    // TOKEN INTROSPECTION (RFC 7662)
-    // ══════════════════════════════════════════════════════════════════
-    
-    /// <summary>
-    /// Token Introspection Endpoint
-    /// Allows resource servers to validate tokens
-    /// </summary>
-    [HttpPost("introspect")]
-    [Consumes("application/x-www-form-urlencoded")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<object>> Introspect(
-        [FromForm] string? token,
-        [FromForm(Name = "token_type_hint")] string? tokenTypeHint,
-        [FromForm(Name = "client_id")] string? clientId,
-        [FromForm(Name = "client_secret")] string? clientSecret)
+
+    #endregion
+
+    #region PROTECTED ENDPOINT
+
+    [HttpGet("test-protected")]
+    public IActionResult TestProtected() => Ok(new
     {
+        message = "🛡️ Protected endpoint accessed successfully",
+        userId  = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value ?? "unknown",
+        email   = User.FindFirst(ClaimTypes.Email)?.Value,
+        claims  = User.Claims.Select(c => new { c.Type, c.Value }).ToArray()
+    });
+    
+    [HttpGet("/oauth/userinfo")]
+    [Authorize(AuthenticationSchemes = "Bearer")]
+    public async Task<IActionResult> UserInfo()
+    {
+        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                          ?? User.FindFirstValue("sub");
+
+        if (string.IsNullOrEmpty(userIdClaim) || !Guid.TryParse(userIdClaim, out var userId))
+            return Unauthorized(new { error = "invalid_token" });
+
         try
         {
-            if (string.IsNullOrWhiteSpace(token))
-            {
-                return BadRequest(new { error = "invalid_request", error_description = "token is required" });
-            }
-
-            var result = await _oauthService.IntrospectTokenAsync(
-                token, 
-                tokenTypeHint, 
-                clientId, 
-                clientSecret);
-
-            return Ok(result);
-        }
-        catch (OAuthException ex)
-        {
-            return BadRequest(new { error = ex.Error, error_description = ex.ErrorDescription });
+            var userInfo = await _oauthService.GetUserInfoAsync(userId);
+            return Ok(userInfo);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error in introspect endpoint");
-            return Ok(new { active = false });
+            _logger.LogWarning(ex, "UserInfo request failed for {UserId}", userIdClaim);
+            return Unauthorized(new { error = "invalid_token" });
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════
-    // TOKEN REVOCATION (RFC 7009)
-    // ══════════════════════════════════════════════════════════════════
-    
-    /// <summary>
-    /// Token Revocation Endpoint
-    /// Allows clients to revoke tokens
-    /// </summary>
-    [HttpPost("revoke")]
-    [Consumes("application/x-www-form-urlencoded")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<IActionResult> Revoke(
-        [FromForm] string? token,
-        [FromForm(Name = "token_type_hint")] string? tokenTypeHint,
-        [FromForm(Name = "client_id")] string? clientId,
-        [FromForm(Name = "client_secret")] string? clientSecret)
+    #endregion
+
+    #region PRIVATE HELPERS
+
+    private static string LoginPage(string? returnUrl, string errorMessage = "")
     {
-        try
-        {
-            if (string.IsNullOrWhiteSpace(token))
-            {
-                return BadRequest(new { error = "invalid_request", error_description = "token is required" });
-            }
+        var errorHtml = string.IsNullOrEmpty(errorMessage)
+            ? ""
+            : $"<div class='error'>{HttpUtility.HtmlEncode(errorMessage)}</div>";
 
-            await _oauthService.RevokeTokenAsync(
-                token, 
-                tokenTypeHint, 
-                clientId, 
-                clientSecret);
-
-            return Ok();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in revoke endpoint");
-            // RFC 7009: The authorization server responds with HTTP status code 200
-            // even if the token is invalid
-            return Ok();
-        }
-    }
-    
-    // ══════════════════════════════════════════════════════════════════
-    // HELPER METHODS
-    // ══════════════════════════════════════════════════════════════════
-
-    private async Task<ActionResult<TokenResponse>> HandleAuthorizationCodeGrant(
-        string? code,
-        string? redirectUri,
-        string? clientId,
-        string? clientSecret,
-        string? codeVerifier,
-        Guid clientGuid)
-    {
-        if (string.IsNullOrWhiteSpace(code))
-            return BadRequest(new OAuthErrorResponse("invalid_request", "code is required"));
-
-        if (string.IsNullOrWhiteSpace(redirectUri))
-            return BadRequest(new OAuthErrorResponse("invalid_request", "redirect_uri is required"));
-
-        // Validate client secret for confidential clients
-        var client = await _oauthService.GetClientByIdAsync(clientGuid);
-        if (client?.ClientType == Core.Enums.OAuthClientType.Confidential)
-        {
-            if (string.IsNullOrWhiteSpace(clientSecret))
-                return BadRequest(new OAuthErrorResponse("invalid_client", "client_secret is required"));
-
-            if (!await _oauthService.ValidateClientAsync(clientId!, clientSecret))
-                return BadRequest(new OAuthErrorResponse("invalid_client", "Invalid client credentials"));
-        }
-
-        var tokenResponse = await _oauthService.ExchangeAuthorizationCodeAsync(
-            code,
-            clientGuid,
-            redirectUri,
-            codeVerifier);
-
-        return Ok(tokenResponse);
-    }
-
-    private async Task<ActionResult<TokenResponse>> HandleRefreshTokenGrant(
-        string? refreshToken,
-        string? clientId,
-        string? clientSecret,
-        Guid clientGuid)
-    {
-        if (string.IsNullOrWhiteSpace(refreshToken))
-            return BadRequest(new OAuthErrorResponse("invalid_request", "refresh_token is required"));
-
-        // Validate client credentials
-        if (!await _oauthService.ValidateClientAsync(clientId!, clientSecret))
-            return BadRequest(new OAuthErrorResponse("invalid_client", "Invalid client credentials"));
-
-        var tokenResponse = await _oauthService.RefreshTokenAsync(refreshToken, clientGuid);
-        return Ok(tokenResponse);
-    }
-
-    private async Task<ActionResult<TokenResponse>> HandleClientCredentialsGrant(
-        string? clientId,
-        string? clientSecret)
-    {
-        if (string.IsNullOrWhiteSpace(clientSecret))
-            return BadRequest(new OAuthErrorResponse("invalid_request", "client_secret is required"));
-
-        var tokenResponse = await _oauthService.ClientCredentialsAsync(clientId!, clientSecret);
-        return Ok(tokenResponse);
-    }
-
-    private async Task<IActionResult> ShowConsentScreen(
-        Guid userId,
-        Core.Entities.OAuth.OAuthClient client,
-        string redirectUri,
-        string scope,
-        string? state,
-        string? codeChallenge,
-        string? codeChallengeMethod,
-        string? nonce)
-    {
-        // Return HTML consent screen
-        var scopes = scope.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var allowedScopes = JsonSerializer.Deserialize<List<string>>(client.AllowedScopes) ?? new List<string>();
-        
-        var html = GenerateConsentHtml(
-            client.Name,
-            client.Description ?? "",
-            scopes.Where(s => allowedScopes.Contains(s)).ToArray(),
-            client.ClientId,
-            redirectUri,
-            scope,
-            state ?? "",
-            codeChallenge ?? "",
-            codeChallengeMethod ?? "",
-            nonce ?? "");
-
-        return Content(html, "text/html");
-    }
-
-    private static string BuildCallbackUri(string redirectUri, string code, string? state)
-    {
-        var builder = new UriBuilder(redirectUri);
-        var query = System.Web.HttpUtility.ParseQueryString(builder.Query);
-        
-        query["code"] = code;
-        if (!string.IsNullOrWhiteSpace(state))
-        {
-            query["state"] = state;
-        }
-
-        builder.Query = query.ToString();
-        return builder.ToString();
-    }
-
-    private IActionResult RedirectToError(string redirectUri, string error, string? errorDescription, string? state)
-    {
-        var builder = new UriBuilder(redirectUri);
-        var query = System.Web.HttpUtility.ParseQueryString(builder.Query);
-        
-        query["error"] = error;
-        if (!string.IsNullOrWhiteSpace(errorDescription))
-        {
-            query["error_description"] = errorDescription;
-        }
-        if (!string.IsNullOrWhiteSpace(state))
-        {
-            query["state"] = state;
-        }
-
-        builder.Query = query.ToString();
-        return Redirect(builder.ToString());
-    }
-
-    private Guid? GetAuthenticatedUserId()
-    {
-        // TODO: Get from JWT claims when authentication is implemented
-        // For now, return null to simulate unauthenticated user
-        
-        // var userIdClaim = User.FindFirst("sub")?.Value;
-        // if (Guid.TryParse(userIdClaim, out var userId))
-        // {
-        //     return userId;
-        // }
-        
-        return null;
-    }
-
-    private static string GenerateConsentHtml(
-        string clientName,
-        string clientDescription,
-        string[] scopes,
-        string clientId,
-        string redirectUri,
-        string scope,
-        string state,
-        string codeChallenge,
-        string codeChallengeMethod,
-        string nonce)
-    {
-        var scopeDescriptions = new Dictionary<string, string>
-        {
-            { "openid", "Access your basic profile information" },
-            { "profile", "Access your full profile (name, picture, etc.)" },
-            { "email", "Access your email address" },
-            { "offline_access", "Keep access to your data even when you're not using the app" }
-        };
-
-        var scopeItems = string.Join("", scopes.Select(s => 
-            $"<li><strong>{s}</strong>: {scopeDescriptions.GetValueOrDefault(s, "Access your data")}</li>"));
-
-        return $@"
-<!DOCTYPE html>
+        return $@"<!DOCTYPE html>
 <html>
 <head>
-    <meta charset=""utf-8"">
-    <meta name=""viewport"" content=""width=device-width, initial-scale=1"">
-    <title>Authorization Required - SpiceAuth</title>
+    <title>SpiceAuth - Logowanie</title>
+    <meta charset='utf-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <meta http-equiv='Content-Security-Policy' content=""default-src 'self'; style-src 'unsafe-inline'; script-src 'none';"">
     <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }}
-        .container {{
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 480px;
-            width: 100%;
-            overflow: hidden;
-        }}
-        .header {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 32px;
-            text-align: center;
-        }}
-        .header h1 {{ font-size: 24px; margin-bottom: 8px; }}
-        .header p {{ opacity: 0.9; font-size: 14px; }}
-        .content {{
-            padding: 32px;
-        }}
-        .client-info {{
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 16px;
-            margin-bottom: 24px;
-        }}
-        .client-name {{
-            font-size: 20px;
-            font-weight: 600;
-            color: #212529;
-            margin-bottom: 4px;
-        }}
-        .client-desc {{
-            color: #6c757d;
-            font-size: 14px;
-        }}
-        .permissions {{
-            margin: 24px 0;
-        }}
-        .permissions h3 {{
-            font-size: 16px;
-            color: #212529;
-            margin-bottom: 12px;
-        }}
-        .permissions ul {{
-            list-style: none;
-            padding: 0;
-        }}
-        .permissions li {{
-            padding: 12px;
-            background: #f8f9fa;
-            border-radius: 6px;
-            margin-bottom: 8px;
-            font-size: 14px;
-            line-height: 1.5;
-        }}
-        .permissions strong {{
-            color: #667eea;
-            text-transform: capitalize;
-        }}
-        .warning {{
-            background: #fff3cd;
-            border-left: 4px solid #ffc107;
-            padding: 12px;
-            border-radius: 4px;
-            margin: 16px 0;
-            font-size: 13px;
-            color: #856404;
-        }}
-        .actions {{
-            display: flex;
-            gap: 12px;
-            margin-top: 24px;
-        }}
-        button {{
-            flex: 1;
-            padding: 14px;
-            border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-        }}
-        .btn-approve {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }}
-        .btn-approve:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-        }}
-        .btn-deny {{
-            background: #6c757d;
-            color: white;
-        }}
-        .btn-deny:hover {{
-            background: #5a6268;
-        }}
+        *{{margin:0;padding:0;box-sizing:border-box}}
+        body{{font-family:system-ui,-apple-system,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}}
+        .login-container{{background:white;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.3);max-width:400px;width:100%;overflow:hidden}}
+        .login-header{{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:32px;text-align:center}}
+        .login-form{{padding:32px}}
+        .form-group{{margin-bottom:20px}}
+        input[type='email'],input[type='password']{{width:100%;padding:14px;border:2px solid #e1e5e9;border-radius:8px;font-size:16px;transition:border-color .2s;box-sizing:border-box}}
+        input[type='email']:focus,input[type='password']:focus{{outline:none;border-color:#667eea}}
+        .checkbox-group{{display:flex;align-items:center;gap:8px;margin-bottom:24px}}
+        button{{width:100%;padding:16px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;transition:transform .2s}}
+        button:hover{{transform:translateY(-1px)}}
+        button:active{{transform:translateY(0)}}
+        .error{{color:#dc3545;margin-top:12px;padding:12px;background:#f8d7da;border-radius:6px;border-left:4px solid #dc3545}}
     </style>
 </head>
 <body>
-    <div class=""container"">
-        <div class=""header"">
-            <h1>🔐 Authorization Required</h1>
-            <p>SpiceAuth</p>
+    <div class='login-container'>
+        <div class='login-header'>
+            <h1>🔐 SpiceAuth</h1>
+            <p>Zaloguj się aby kontynuować</p>
         </div>
-        <div class=""content"">
-            <div class=""client-info"">
-                <div class=""client-name"">{clientName}</div>
-                {(string.IsNullOrWhiteSpace(clientDescription) ? "" : $"<div class=\"client-desc\">{clientDescription}</div>")}
-            </div>
-            
-            <p style=""margin-bottom: 16px; color: #495057;"">
-                <strong>{clientName}</strong> is requesting access to your account.
-            </p>
-            
-            <div class=""permissions"">
-                <h3>This application will be able to:</h3>
-                <ul>
-                    {scopeItems}
-                </ul>
-            </div>
-            
-            <div class=""warning"">
-                ⚠️ Only authorize applications you trust. You can revoke access at any time from your account settings.
-            </div>
-            
-            <form method=""POST"" action=""/oauth/authorize/consent"">
-                <input type=""hidden"" name=""clientId"" value=""{clientId}"" />
-                <input type=""hidden"" name=""redirectUri"" value=""{redirectUri}"" />
-                <input type=""hidden"" name=""scope"" value=""{scope}"" />
-                <input type=""hidden"" name=""state"" value=""{state}"" />
-                <input type=""hidden"" name=""codeChallenge"" value=""{codeChallenge}"" />
-                <input type=""hidden"" name=""codeChallengeMethod"" value=""{codeChallengeMethod}"" />
-                <input type=""hidden"" name=""nonce"" value=""{nonce}"" />
-                
-                <div class=""actions"">
-                    <button type=""submit"" name=""approved"" value=""false"" class=""btn-deny"">
-                        Deny
-                    </button>
-                    <button type=""submit"" name=""approved"" value=""true"" class=""btn-approve"">
-                        Authorize
-                    </button>
+        <div class='login-form'>
+            <form method='post' action='/api/oauth/account/login?returnUrl={Uri.EscapeDataString(returnUrl ?? "")}'>
+                <div class='form-group'>
+                    <input name='Email' type='email' placeholder='Email' required autofocus autocomplete='email'>
                 </div>
+                <div class='form-group'>
+                    <input name='Password' type='password' placeholder='Hasło' required autocomplete='current-password'>
+                </div>
+                <div class='checkbox-group'>
+                    <input type='checkbox' name='RememberMe' id='remember'>
+                    <label for='remember'>Zapamiętaj mnie</label>
+                </div>
+                {errorHtml}
+                <button type='submit'>Zaloguj się</button>
             </form>
         </div>
     </div>
-</body>
-</html>";
+</body></html>";
     }
+
+    private static string BuildRedirectUri(string redirectUri, string code, string state)
+    {
+        var uriBuilder = new UriBuilder(redirectUri);
+        var query      = HttpUtility.ParseQueryString(uriBuilder.Query);
+        query["code"]  = code;
+        if (!string.IsNullOrWhiteSpace(state))
+            query["state"] = state;
+        uriBuilder.Query = query.ToString();
+        return uriBuilder.ToString();
+    }
+
+    private IActionResult RedirectToError(string redirectUri, string error,
+        string? errorDescription = null, string? state = null)
+    {
+        var uriBuilder = new UriBuilder(redirectUri);
+        var query      = HttpUtility.ParseQueryString(uriBuilder.Query);
+        query["error"] = error;
+        if (!string.IsNullOrWhiteSpace(errorDescription))
+            query["error_description"] = errorDescription;
+        if (!string.IsNullOrWhiteSpace(state))
+            query["state"] = state;
+        uriBuilder.Query = query.ToString();
+        return Redirect(uriBuilder.ToString());
+    }
+
+    private IActionResult ShowConsentScreen(
+        OAuthClient client,
+        string redirectUri, string scope, string state,
+        string? codeChallenge, string? codeChallengeMethod, string? nonce)
+    {
+        var frontendUrl = _configuration["App:FrontendUrl"] ?? "http://localhost:3002";
+        var query       = HttpUtility.ParseQueryString(string.Empty);
+
+        query["clientId"]            = client.ClientId;
+        query["clientName"]          = client.Name;
+        query["clientDescription"]   = client.Description ?? "";
+        query["redirectUri"]         = redirectUri;
+        query["scope"]               = scope;
+        query["state"]               = state;
+        query["codeChallenge"]       = codeChallenge ?? "";
+        query["codeChallengeMethod"] = codeChallengeMethod ?? "";
+        query["nonce"]               = nonce ?? "";
+
+        return Redirect($"{frontendUrl}/consent?{query}");
+    }
+
+    public static (int ClientsRemoved, int LoginsRemoved) CleanupExpiredLocks()
+    {
+        var now = DateTime.UtcNow;
+
+        var expiredClients = FailedClientAuth
+            .Where(x => x.Value.LockUntil < now.AddHours(-1))
+            .Select(x => x.Key).ToList();
+        foreach (var key in expiredClients)
+            FailedClientAuth.TryRemove(key, out _);
+
+        var expiredLogins = FailedLoginAttempts
+            .Where(x => x.Value.LockUntil < now.AddHours(-1))
+            .Select(x => x.Key).ToList();
+        foreach (var key in expiredLogins)
+            FailedLoginAttempts.TryRemove(key, out _);
+
+        return (expiredClients.Count, expiredLogins.Count);
+    }
+
+    #endregion
+}
+
+public record LoginModel
+{
+    public string Email      { get; set; } = string.Empty;
+    public string Password   { get; set; } = string.Empty;
+    public bool   RememberMe { get; set; } = false;
 }

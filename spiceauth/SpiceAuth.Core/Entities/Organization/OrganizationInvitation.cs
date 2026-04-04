@@ -16,5 +16,4 @@ public class OrganizationInvitation : BaseEntity
     
     // Navigation properties
     public Organization Organization { get; set; } = null!;
-    public User InvitedBy { get; set; } = null!;
 }

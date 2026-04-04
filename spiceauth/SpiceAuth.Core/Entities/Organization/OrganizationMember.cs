@@ -14,5 +14,4 @@ public class OrganizationMember : BaseEntity
     
     // Navigation properties
     public Organization Organization { get; set; } = null!;
-    public User User { get; set; } = null!;
 }

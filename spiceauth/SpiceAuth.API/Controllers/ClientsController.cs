@@ -1,131 +1,299 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using System.Security.Claims;
 using SpiceAuth.Application.DTOs.OAuth;
 using SpiceAuth.Application.Services.OAuth;
+using SpiceAuth.Application.Services.Audit;
+using SpiceAuth.Core.Entities.Security;
+using SpiceAuth.Core.Enums;
 
 namespace SpiceAuth.API.Controllers;
 
 [ApiController]
-[Route("api/[controller]")]
-public class ClientsController(IOAuthService oauthService) : ControllerBase
+[Route("api/clients")]
+[Authorize(AuthenticationSchemes = "Bearer")]
+public class ClientsController(
+    IOAuthService oauthService,
+    IAuditService auditService,
+    ILogger<ClientsController> logger) : ControllerBase
 {
     private readonly IOAuthService _oauthService = oauthService;
+    private readonly IAuditService _auditService = auditService;
+    private readonly ILogger<ClientsController> _logger = logger;
 
-    /// <summary>
-    /// Register new OAuth client (Developer Portal)
-    /// TODO: Add authentication requirement
-    /// </summary>
+    private Guid? GetUserId()
+    {
+        var claim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        return Guid.TryParse(claim, out var id) ? id : null;
+    }
+
+    private string GetEmail() => User.FindFirstValue(ClaimTypes.Email) ?? "unknown";
+    private string Ip() => HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+    private static string FormatDate(DateTime dt) =>
+        (dt.Kind == DateTimeKind.Utc ? dt : DateTime.SpecifyKind(dt, DateTimeKind.Utc)).ToString("O");
+
+    private static string[] DeserializeJson(string? json) =>
+        string.IsNullOrEmpty(json)
+            ? []
+            : System.Text.Json.JsonSerializer.Deserialize<string[]>(json) ?? [];
+
     [HttpPost("register")]
-    [ProducesResponseType(typeof(ClientRegistrationResponse), StatusCodes.Status201Created)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<ClientRegistrationResponse>> RegisterClient(
         [FromBody] RegisterClientRequest request)
     {
-        // TODO: Get authenticated user ID from JWT
-        var userId = Guid.NewGuid(); // TEMPORARY
+        var userId = GetUserId();
+        if (userId is null)
+            return Unauthorized(new { error = "Invalid authentication token" });
 
-        if (string.IsNullOrWhiteSpace(request.ClientName))
-        {
+        if (string.IsNullOrWhiteSpace(request.Name))
             return BadRequest(new { error = "Client name is required" });
-        }
 
         if (request.RedirectUris == null || !request.RedirectUris.Any())
-        {
             return BadRequest(new { error = "At least one redirect URI is required" });
-        }
+
+        if (request.AllowedScopes == null || !request.AllowedScopes.Any())
+            return BadRequest(new { error = "At least one scope is required" });
 
         try
         {
-            var response = await _oauthService.RegisterClientAsync(request, userId);
-            
-            return CreatedAtAction(
-                nameof(GetClient),
-                new { clientId = response.ClientId },
-                response);
+            var response = await _oauthService.RegisterClientAsync(request, userId.Value);
+
+            await _auditService.LogAsync(
+                action: AuditAction.ClientRegistered,
+                actorEmail: GetEmail(),
+                actorId: userId,
+                resourceType: "Client",
+                resourceId: response.ClientId,
+                resourceName: request.Name,
+                ipAddress: Ip());
+
+            _logger.LogInformation("OAuth client registered: {ClientId} by user {UserId}",
+                response.ClientId, userId);
+
+            return CreatedAtAction(nameof(GetClient), new { clientId = response.ClientId }, response);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
         }
         catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error registering OAuth client for user {UserId}", userId);
+            return StatusCode(500, new { error = "An error occurred while registering the client" });
+        }
+    }
+
+    [HttpGet]
+    public async Task<ActionResult<object>> GetMyClients()
+    {
+        var userId = GetUserId();
+        if (userId is null)
+            return Unauthorized(new { error = "Invalid authentication token" });
+
+        var clients = await _oauthService.GetUserClientsAsync(userId.Value);
+
+        return Ok(clients.Select(c => new
+        {
+            clientId = c.ClientId,
+            name = c.Name,
+            description = c.Description,
+            clientType = c.ClientType.ToString(),
+            redirectUris = DeserializeJson(c.RedirectUris),
+            allowedScopes = DeserializeJson(c.AllowedScopes),
+            requireConsent = c.RequireConsent,
+            requirePkce = c.RequirePkce,
+            isActive = c.IsActive,
+            createdAt = FormatDate(c.CreatedAt)
+        }));
+    }
+
+    [HttpGet("{clientId}")]
+    public async Task<ActionResult<object>> GetClient(string clientId)
+    {
+        var userId = GetUserId();
+        if (userId is null)
+            return Unauthorized(new { error = "Invalid authentication token" });
+
+        var client = await _oauthService.GetClientByClientIdAsync(clientId);
+        if (client == null)
+            return NotFound(new { error = "Client not found" });
+
+        if (client.CreatedByUserId != userId.Value && !User.IsInRole("Admin"))
+            return Forbid();
+
+        return Ok(new
+        {
+            clientId = client.ClientId,
+            name = client.Name,
+            description = client.Description,
+            clientType = client.ClientType.ToString(),
+            redirectUris = DeserializeJson(client.RedirectUris),
+            allowedScopes = DeserializeJson(client.AllowedScopes),
+            requireConsent = client.RequireConsent,
+            requirePkce = client.RequirePkce,
+            isActive = client.IsActive,
+            createdAt = FormatDate(client.CreatedAt),
+            updatedAt = client.UpdatedAt.HasValue ? FormatDate(client.UpdatedAt.Value) : null
+        });
+    }
+
+    [HttpPut("{clientId}")]
+    public async Task<ActionResult<object>> UpdateClient(
+        string clientId,
+        [FromBody] UpdateClientRequest request)
+    {
+        var userId = GetUserId();
+        if (userId is null)
+            return Unauthorized(new { error = "Invalid authentication token" });
+
+        var client = await _oauthService.GetClientByClientIdAsync(clientId);
+        if (client == null)
+            return NotFound(new { error = "Client not found" });
+
+        if (client.CreatedByUserId != userId.Value && !User.IsInRole("Admin"))
+            return Forbid();
+
+        if (string.IsNullOrWhiteSpace(request.Name))
+            return BadRequest(new { error = "Client name is required" });
+
+        if (request.RedirectUris == null || !request.RedirectUris.Any())
+            return BadRequest(new { error = "At least one redirect URI is required" });
+
+        try
+        {
+            var updated = await _oauthService.UpdateClientAsync(client.Id, request, userId.Value);
+
+            await _auditService.LogAsync(
+                action: AuditAction.ClientUpdated,
+                actorEmail: GetEmail(),
+                actorId: userId,
+                resourceType: "Client",
+                resourceId: clientId,
+                resourceName: updated.Name,
+                ipAddress: Ip());
+
+            return Ok(new
+            {
+                clientId = updated.ClientId,
+                name = updated.Name,
+                description = updated.Description,
+                clientType = updated.ClientType.ToString(),
+                redirectUris = DeserializeJson(updated.RedirectUris),
+                allowedScopes = DeserializeJson(updated.AllowedScopes),
+                requireConsent = updated.RequireConsent,
+                requirePkce = updated.RequirePkce,
+                isActive = updated.IsActive,
+                createdAt = FormatDate(updated.CreatedAt),
+                updatedAt = updated.UpdatedAt.HasValue ? FormatDate(updated.UpdatedAt.Value) : null
+            });
+        }
+        catch (InvalidOperationException ex)
         {
             return BadRequest(new { error = ex.Message });
         }
     }
 
-    /// <summary>
-    /// Get client details
-    /// TODO: Add authentication + authorization
-    /// </summary>
-    [HttpGet("{clientId}")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<object>> GetClient(string clientId)
+    [HttpPost("{clientId}/rotate-secret")]
+    public async Task<ActionResult<object>> RotateSecret(string clientId)
     {
+        var userId = GetUserId();
+        if (userId is null)
+            return Unauthorized(new { error = "Invalid authentication token" });
+
         var client = await _oauthService.GetClientByClientIdAsync(clientId);
-        
         if (client == null)
+            return NotFound(new { error = "Client not found" });
+
+        if (client.CreatedByUserId != userId.Value && !User.IsInRole("Admin"))
+            return Forbid();
+
+        if (client.ClientType == ClientType.Public)
+            return BadRequest(new { error = "Public clients do not use client secrets" });
+
+        try
         {
-            return NotFound();
+            var newSecret = await _oauthService.RotateClientSecretAsync(client.Id, userId.Value);
+
+            await _auditService.LogAsync(
+                action: AuditAction.ClientSecretRotated,
+                actorEmail: GetEmail(),
+                actorId: userId,
+                resourceType: "Client",
+                resourceId: clientId,
+                resourceName: client.Name,
+                ipAddress: Ip());
+
+            return Ok(new
+            {
+                clientId = client.ClientId,
+                clientSecret = newSecret,
+                rotatedAt = DateTime.UtcNow.ToString("O")
+            });
         }
-
-        return Ok(new
+        catch (InvalidOperationException ex)
         {
-            client_id = client.ClientId,
-            name = client.Name,
-            description = client.Description,
-            client_type = client.ClientType.ToString(),
-            redirect_uris = System.Text.Json.JsonSerializer.Deserialize<string[]>(client.RedirectUris),
-            allowed_scopes = System.Text.Json.JsonSerializer.Deserialize<string[]>(client.AllowedScopes),
-            requires_pkce = client.RequirePkce,
-            requires_consent = client.RequireConsent,
-            is_active = client.IsActive,
-            created_at = client.CreatedAt
-        });
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
-    /// <summary>
-    /// Get all clients for authenticated user
-    /// TODO: Add authentication
-    /// </summary>
-    [HttpGet]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<object>> GetMyClients()
+    [HttpPut("{clientId}/status")]
+    public async Task<ActionResult<object>> SetClientStatus(
+        string clientId,
+        [FromBody] SetClientStatusRequest request)
     {
-        // TODO: Get authenticated user ID
-        var userId = Guid.NewGuid(); // TEMPORARY
+        var userId = GetUserId();
+        if (userId is null)
+            return Unauthorized(new { error = "Invalid authentication token" });
 
-        var clients = await _oauthService.GetUserClientsAsync(userId);
+        var client = await _oauthService.GetClientByClientIdAsync(clientId);
+        if (client == null)
+            return NotFound(new { error = "Client not found" });
 
-        return Ok(clients.Select(c => new
-        {
-            client_id = c.ClientId,
-            name = c.Name,
-            client_type = c.ClientType.ToString(),
-            is_active = c.IsActive,
-            created_at = c.CreatedAt
-        }));
+        if (client.CreatedByUserId != userId.Value && !User.IsInRole("Admin"))
+            return Forbid();
+
+        await _oauthService.SetClientStatusAsync(client.Id, request.IsActive, userId.Value);
+
+        await _auditService.LogAsync(
+            action: AuditAction.ClientStatusChanged,
+            actorEmail: GetEmail(),
+            actorId: userId,
+            resourceType: "Client",
+            resourceId: clientId,
+            resourceName: client.Name,
+            metadata: request.IsActive ? "Activated" : "Deactivated",
+            ipAddress: Ip());
+
+        return Ok(new { clientId = client.ClientId, isActive = request.IsActive });
     }
 
-    /// <summary>
-    /// Delete/deactivate client
-    /// TODO: Add authentication
-    /// </summary>
     [HttpDelete("{clientId}")]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult> DeleteClient(string clientId)
     {
-        // TODO: Get authenticated user ID
-        var userId = Guid.NewGuid(); // TEMPORARY
+        var userId = GetUserId();
+        if (userId is null)
+            return Unauthorized(new { error = "Invalid authentication token" });
 
         var client = await _oauthService.GetClientByClientIdAsync(clientId);
         if (client == null)
-        {
-            return NotFound();
-        }
+            return NotFound(new { error = "Client not found" });
 
-        var success = await _oauthService.DeleteClientAsync(client.Id, userId);
-        
+        if (client.CreatedByUserId != userId.Value && !User.IsInRole("Admin"))
+            return Forbid();
+
+        var success = await _oauthService.DeleteClientAsync(client.Id, userId.Value);
         if (!success)
-        {
-            return NotFound();
-        }
+            return NotFound(new { error = "Client not found" });
+
+        await _auditService.LogAsync(
+            action: AuditAction.ClientDeleted,
+            actorEmail: GetEmail(),
+            actorId: userId,
+            resourceType: "Client",
+            resourceId: clientId,
+            resourceName: client.Name,
+            ipAddress: Ip());
 
         return NoContent();
     }

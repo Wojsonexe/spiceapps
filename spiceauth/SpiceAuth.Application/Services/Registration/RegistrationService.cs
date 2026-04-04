@@ -26,6 +26,7 @@ public sealed class RegistrationService : IRegistrationService
         _emailService = emailService;
         _logger = logger;
     }
+    
     public async Task<RegistrationRequest> CreateRegistrationRequestAsync(CreateRegistrationRequest request)
     {
         // Validate email is not already registered or pending
@@ -69,8 +70,6 @@ public sealed class RegistrationService : IRegistrationService
             "Registration request created: {RequestId} for email {Email}", 
             registrationRequest.Id, 
             registrationRequest.Email);
-
-        // TODO: Trigger SignalR notification to admins
 
         return registrationRequest;
     }
@@ -124,21 +123,27 @@ public sealed class RegistrationService : IRegistrationService
             return false;
         }
 
-        // Create the user account
         try
         {
-            var user = await _identityService.CreateUserAsync(
+            var registerResult = await _identityService.CreateUserAsync(
                 email: request.Email,
                 username: request.Username,
-                password: null, // User will set password later or login via external provider
-                firstName: request.FirstName,
-                lastName: request.LastName
+                password: "",
+                firstName: request.FirstName ?? "",
+                lastName: request.LastName ?? ""
             );
+            
+            if (!registerResult.Success)
+            {
+                _logger.LogError("Failed to create user for request {RequestId}: {Message}",
+                    requestId, registerResult.Message);
+                return false;
+            }
 
-            // Activate the user immediately
-            await _identityService.ActivateUserAsync(user.Id);
+            var userId = registerResult.UserId!.Value;
 
-            // Update registration request
+            await _identityService.ActivateUserAsync(userId);
+
             request.Status = RegistrationStatus.Approved;
             request.ProcessedAt = DateTime.UtcNow;
             request.ProcessedByUserId = approvedByUserId;
@@ -149,13 +154,10 @@ public sealed class RegistrationService : IRegistrationService
 
             _logger.LogInformation(
                 "Registration request approved: {RequestId} by user {ApprovedBy}. User created: {UserId}",
-                requestId,
-                approvedByUserId,
-                user.Id);
+                requestId, approvedByUserId, userId);
 
-            await _emailService.SendRegistrationApprovedAsync(user.Email, user.Username);
-
-            await _identityService.GenerateEmailVerificationTokenAsync(user.Id, "system", "registration-approval");
+            await _emailService.SendRegistrationApprovedAsync(request.Email, request.Username);
+            await _identityService.GenerateEmailVerificationTokenAsync(userId, "system", "registration-approval");
 
             return true;
         }
@@ -203,10 +205,7 @@ public sealed class RegistrationService : IRegistrationService
             rejectedByUserId,
             reason);
 
-        // TODO: Send rejection email to user
         await _emailService.SendRegistrationRejectedAsync(request.Email, request.Username, reason);
-
-        // TODO: Trigger SignalR notification to user
 
         return true;
     }

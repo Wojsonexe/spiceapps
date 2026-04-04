@@ -17,10 +17,140 @@ namespace SpiceAuth.Infrastructure.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "8.0.0")
+                .HasAnnotation("ProductVersion", "8.0.11")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole<System.Guid>", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ConcurrencyStamp")
+                        .IsConcurrencyToken()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Name")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("NormalizedName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NormalizedName")
+                        .IsUnique()
+                        .HasDatabaseName("RoleNameIndex");
+
+                    b.ToTable("AspNetRoles", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<System.Guid>", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ClaimType")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ClaimValue")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("RoleId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RoleId");
+
+                    b.ToTable("AspNetRoleClaims", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserClaim<System.Guid>", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ClaimType")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ClaimValue")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("AspNetUserClaims", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserLogin<System.Guid>", b =>
+                {
+                    b.Property<string>("LoginProvider")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProviderKey")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProviderDisplayName")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("LoginProvider", "ProviderKey");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("AspNetUserLogins", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserRole<System.Guid>", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RoleId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("UserId", "RoleId");
+
+                    b.HasIndex("RoleId");
+
+                    b.ToTable("AspNetUserRoles", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserToken<System.Guid>", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("LoginProvider")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Name")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Value")
+                        .HasColumnType("text");
+
+                    b.HasKey("UserId", "LoginProvider", "Name");
+
+                    b.ToTable("AspNetUserTokens", (string)null);
+                });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Authorization.Role", b =>
                 {
@@ -58,7 +188,7 @@ namespace SpiceAuth.Infrastructure.Migrations
                         .IsUnique()
                         .HasDatabaseName("IX_Roles_Name");
 
-                    b.ToTable("Roles");
+                    b.ToTable("SpiceRoles");
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Authorization.Scope", b =>
@@ -121,10 +251,15 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.Property<Guid>("RoleId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("ApplicationUserId")
+                        .HasColumnType("uuid");
+
                     b.Property<DateTime>("AssignedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.HasKey("UserId", "RoleId");
+
+                    b.HasIndex("ApplicationUserId");
 
                     b.HasIndex("AssignedAt")
                         .HasDatabaseName("IX_UserRoles_AssignedAt");
@@ -135,7 +270,7 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.HasIndex("UserId")
                         .HasDatabaseName("IX_UserRoles_UserId");
 
-                    b.ToTable("UserRoles");
+                    b.ToTable("SpiceUserRoles");
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Authorization.UserScope", b =>
@@ -144,6 +279,9 @@ namespace SpiceAuth.Infrastructure.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("ScopeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ApplicationUserId")
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("ExpiresAt")
@@ -156,6 +294,8 @@ namespace SpiceAuth.Infrastructure.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("UserId", "ScopeId");
+
+                    b.HasIndex("ApplicationUserId");
 
                     b.HasIndex("ExpiresAt")
                         .HasDatabaseName("IX_UserScopes_ExpiresAt");
@@ -170,6 +310,118 @@ namespace SpiceAuth.Infrastructure.Migrations
                         .HasDatabaseName("IX_UserScopes_UserId");
 
                     b.ToTable("UserScopes");
+                });
+
+            modelBuilder.Entity("SpiceAuth.Core.Entities.Identity.ApplicationUser", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AccessFailedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<DateOnly?>("BirthDay")
+                        .HasColumnType("date");
+
+                    b.Property<string>("ConcurrencyStamp")
+                        .IsConcurrencyToken()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Department")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("DiscordId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("DiscordUsername")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Email")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<bool>("EmailConfirmed")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("FirstName")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsApproved")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsSuspended")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("LastLoginAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastName")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("LockoutEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset?>("LockoutEnd")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("MfaSettingsUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("NormalizedEmail")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("NormalizedUserName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("PasswordHash")
+                        .HasColumnType("text");
+
+                    b.Property<string>("PhoneNumber")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("PhoneNumberConfirmed")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("ProfilePictureUrl")
+                        .HasColumnType("text");
+
+                    b.Property<string>("SecurityStamp")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("SuspendedUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("TwoFactorEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UserName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MfaSettingsUserId");
+
+                    b.HasIndex("NormalizedEmail")
+                        .HasDatabaseName("EmailIndex");
+
+                    b.HasIndex("NormalizedUserName")
+                        .IsUnique()
+                        .HasDatabaseName("UserNameIndex");
+
+                    b.ToTable("AspNetUsers", (string)null);
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Identity.EmailVerificationToken", b =>
@@ -235,6 +487,9 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.Property<string>("AccessToken")
                         .HasColumnType("text");
 
+                    b.Property<Guid>("ApplicationUserId")
+                        .HasColumnType("uuid");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -272,6 +527,8 @@ namespace SpiceAuth.Infrastructure.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ApplicationUserId");
 
                     b.HasIndex("UserId")
                         .HasDatabaseName("IX_ExternalIdentities_UserId");
@@ -389,77 +646,6 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("PasswordResetTokens", (string)null);
-                });
-
-            modelBuilder.Entity("SpiceAuth.Core.Entities.Identity.User", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Email")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<bool>("EmailConfirmed")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("FirstName")
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("IsSuspended")
-                        .HasColumnType("boolean");
-
-                    b.Property<DateTime?>("LastLoginAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("LastName")
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<string>("PasswordHash")
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
-
-                    b.Property<string>("ProfilePictureUrl")
-                        .HasColumnType("text");
-
-                    b.Property<DateTime?>("SuspendedUntil")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime?>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Username")
-                        .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("character varying(50)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CreatedAt")
-                        .HasDatabaseName("IX_Users_CreatedAt");
-
-                    b.HasIndex("Email")
-                        .IsUnique()
-                        .HasDatabaseName("IX_Users_Email");
-
-                    b.HasIndex("IsActive")
-                        .HasDatabaseName("IX_Users_IsActive");
-
-                    b.HasIndex("Username")
-                        .IsUnique()
-                        .HasDatabaseName("IX_Users_Username");
-
-                    b.ToTable("Users");
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.OAuth.AuthorizationCode", b =>
@@ -620,6 +806,9 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("LogoUrl")
+                        .HasColumnType("text");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -672,6 +861,9 @@ namespace SpiceAuth.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("ApplicationUserId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid>("ClientId")
                         .HasColumnType("uuid");
 
@@ -686,6 +878,9 @@ namespace SpiceAuth.Infrastructure.Migrations
 
                     b.Property<bool>("IsUsed")
                         .HasColumnType("boolean");
+
+                    b.Property<Guid?>("OAuthClientId")
+                        .HasColumnType("uuid");
 
                     b.Property<Guid?>("OrganizationId")
                         .HasColumnType("uuid");
@@ -711,6 +906,8 @@ namespace SpiceAuth.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("ApplicationUserId");
+
                     b.HasIndex("ClientId");
 
                     b.HasIndex("ExpiresAt")
@@ -718,6 +915,8 @@ namespace SpiceAuth.Infrastructure.Migrations
 
                     b.HasIndex("IsRevoked")
                         .HasDatabaseName("IX_RefreshTokens_IsRevoked");
+
+                    b.HasIndex("OAuthClientId");
 
                     b.HasIndex("ParentTokenId");
 
@@ -728,7 +927,7 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.HasIndex("UserId", "ClientId")
                         .HasDatabaseName("IX_RefreshTokens_UserId_ClientId");
 
-                    b.ToTable("RefreshTokens");
+                    b.ToTable("RefreshTokens", (string)null);
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Organization.Organization", b =>
@@ -837,8 +1036,6 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.HasIndex("ExpiresAt")
                         .HasDatabaseName("IX_OrganizationInvitations_ExpiresAt");
 
-                    b.HasIndex("InvitedByUserId");
-
                     b.HasIndex("IsRevoked")
                         .HasDatabaseName("IX_OrganizationInvitations_IsRevoked");
 
@@ -856,6 +1053,9 @@ namespace SpiceAuth.Infrastructure.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ApplicationUserId")
                         .HasColumnType("uuid");
 
                     b.Property<DateTime>("CreatedAt")
@@ -883,6 +1083,8 @@ namespace SpiceAuth.Infrastructure.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ApplicationUserId");
 
                     b.HasIndex("IsActive")
                         .HasDatabaseName("IX_OrganizationMembers_IsActive");
@@ -983,6 +1185,13 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.Property<int>("Action")
                         .HasColumnType("integer");
 
+                    b.Property<string>("ActorEmail")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid?>("ApplicationUserId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid?>("ClientId")
                         .HasColumnType("uuid");
 
@@ -1006,6 +1215,9 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.Property<string>("ResourceId")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
+
+                    b.Property<string>("ResourceName")
+                        .HasColumnType("text");
 
                     b.Property<string>("ResourceType")
                         .HasMaxLength(100)
@@ -1031,6 +1243,8 @@ namespace SpiceAuth.Infrastructure.Migrations
 
                     b.HasIndex("Action")
                         .HasDatabaseName("IX_AuditLogs_Action");
+
+                    b.HasIndex("ApplicationUserId");
 
                     b.HasIndex("ClientId")
                         .HasDatabaseName("IX_AuditLogs_ClientId");
@@ -1059,6 +1273,7 @@ namespace SpiceAuth.Infrastructure.Migrations
             modelBuilder.Entity("SpiceAuth.Core.Entities.Security.MfaSettings", b =>
                 {
                     b.Property<Guid>("UserId")
+                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<string>("BackupCodes")
@@ -1204,47 +1419,99 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.ToTable("SigningKeys");
                 });
 
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<System.Guid>", b =>
+                {
+                    b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole<System.Guid>", null)
+                        .WithMany()
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserClaim<System.Guid>", b =>
+                {
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserLogin<System.Guid>", b =>
+                {
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserRole<System.Guid>", b =>
+                {
+                    b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole<System.Guid>", null)
+                        .WithMany()
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserToken<System.Guid>", b =>
+                {
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("SpiceAuth.Core.Entities.Authorization.UserRole", b =>
                 {
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", null)
+                        .WithMany("UserRoles")
+                        .HasForeignKey("ApplicationUserId");
+
                     b.HasOne("SpiceAuth.Core.Entities.Authorization.Role", "Role")
                         .WithMany("UserRoles")
                         .HasForeignKey("RoleId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "User")
-                        .WithMany("UserRoles")
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
                     b.Navigation("Role");
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Authorization.UserScope", b =>
                 {
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", null)
+                        .WithMany("UserScopes")
+                        .HasForeignKey("ApplicationUserId");
+
                     b.HasOne("SpiceAuth.Core.Entities.Authorization.Scope", "Scope")
                         .WithMany("UserScopes")
                         .HasForeignKey("ScopeId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "User")
-                        .WithMany("UserScopes")
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
                     b.Navigation("Scope");
+                });
 
-                    b.Navigation("User");
+            modelBuilder.Entity("SpiceAuth.Core.Entities.Identity.ApplicationUser", b =>
+                {
+                    b.HasOne("SpiceAuth.Core.Entities.Security.MfaSettings", "MfaSettings")
+                        .WithMany()
+                        .HasForeignKey("MfaSettingsUserId");
+
+                    b.Navigation("MfaSettings");
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Identity.EmailVerificationToken", b =>
                 {
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "User")
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", "User")
                         .WithMany()
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
@@ -1255,18 +1522,18 @@ namespace SpiceAuth.Infrastructure.Migrations
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Identity.ExternalIdentity", b =>
                 {
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "User")
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", "ApplicationUser")
                         .WithMany("ExternalIdentities")
-                        .HasForeignKey("UserId")
+                        .HasForeignKey("ApplicationUserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.Navigation("User");
+                    b.Navigation("ApplicationUser");
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Identity.LoginAttempt", b =>
                 {
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "User")
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", "User")
                         .WithMany()
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.SetNull);
@@ -1276,7 +1543,7 @@ namespace SpiceAuth.Infrastructure.Migrations
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Identity.PasswordResetToken", b =>
                 {
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "User")
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", "User")
                         .WithMany()
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
@@ -1309,104 +1576,70 @@ namespace SpiceAuth.Infrastructure.Migrations
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.OAuth.RefreshToken", b =>
                 {
-                    b.HasOne("SpiceAuth.Core.Entities.OAuth.OAuthClient", "Client")
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", null)
                         .WithMany("RefreshTokens")
+                        .HasForeignKey("ApplicationUserId");
+
+                    b.HasOne("SpiceAuth.Core.Entities.OAuth.OAuthClient", "Client")
+                        .WithMany()
                         .HasForeignKey("ClientId")
                         .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
+                        .IsRequired()
+                        .HasConstraintName("FK_RefreshTokens_OAuthClients_ClientId");
+
+                    b.HasOne("SpiceAuth.Core.Entities.OAuth.OAuthClient", null)
+                        .WithMany("RefreshTokens")
+                        .HasForeignKey("OAuthClientId");
 
                     b.HasOne("SpiceAuth.Core.Entities.OAuth.RefreshToken", "ParentToken")
                         .WithMany()
                         .HasForeignKey("ParentTokenId")
-                        .OnDelete(DeleteBehavior.Restrict);
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("FK_RefreshTokens_RefreshTokens_ParentTokenId");
 
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", null)
-                        .WithMany("RefreshTokens")
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", null)
+                        .WithMany()
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
+                        .IsRequired()
+                        .HasConstraintName("FK_RefreshTokens_AspNetUsers_UserId");
 
                     b.Navigation("Client");
 
                     b.Navigation("ParentToken");
                 });
 
-            modelBuilder.Entity("SpiceAuth.Core.Entities.Organization.Organization", b =>
-                {
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "Owner")
-                        .WithMany()
-                        .HasForeignKey("OwnerId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Owner");
-                });
-
             modelBuilder.Entity("SpiceAuth.Core.Entities.Organization.OrganizationInvitation", b =>
                 {
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "InvitedBy")
-                        .WithMany()
-                        .HasForeignKey("InvitedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
                     b.HasOne("SpiceAuth.Core.Entities.Organization.Organization", "Organization")
                         .WithMany("Invitations")
                         .HasForeignKey("OrganizationId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.Navigation("InvitedBy");
-
                     b.Navigation("Organization");
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Organization.OrganizationMember", b =>
                 {
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", null)
+                        .WithMany("OrganizationMemberships")
+                        .HasForeignKey("ApplicationUserId");
+
                     b.HasOne("SpiceAuth.Core.Entities.Organization.Organization", "Organization")
                         .WithMany("Members")
                         .HasForeignKey("OrganizationId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "User")
-                        .WithMany("OrganizationMemberships")
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
                     b.Navigation("Organization");
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Security.AuditLog", b =>
                 {
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", null)
+                    b.HasOne("SpiceAuth.Core.Entities.Identity.ApplicationUser", null)
                         .WithMany("AuditLogs")
-                        .HasForeignKey("UserId");
-                });
-
-            modelBuilder.Entity("SpiceAuth.Core.Entities.Security.MfaSettings", b =>
-                {
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "User")
-                        .WithOne("MfaSettings")
-                        .HasForeignKey("SpiceAuth.Core.Entities.Security.MfaSettings", "UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("User");
-                });
-
-            modelBuilder.Entity("SpiceAuth.Core.Entities.Security.SecurityEvent", b =>
-                {
-                    b.HasOne("SpiceAuth.Core.Entities.Identity.User", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("User");
+                        .HasForeignKey("ApplicationUserId");
                 });
 
             modelBuilder.Entity("SpiceAuth.Core.Entities.Authorization.Role", b =>
@@ -1419,13 +1652,11 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.Navigation("UserScopes");
                 });
 
-            modelBuilder.Entity("SpiceAuth.Core.Entities.Identity.User", b =>
+            modelBuilder.Entity("SpiceAuth.Core.Entities.Identity.ApplicationUser", b =>
                 {
                     b.Navigation("AuditLogs");
 
                     b.Navigation("ExternalIdentities");
-
-                    b.Navigation("MfaSettings");
 
                     b.Navigation("OrganizationMemberships");
 

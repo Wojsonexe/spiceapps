@@ -41,12 +41,6 @@ public class OrganizationConfiguration : IEntityTypeConfiguration<Organization>
         
         builder.HasIndex(o => o.IsActive)
             .HasDatabaseName("IX_Organizations_IsActive");
-
-        // Relationships
-        builder.HasOne(o => o.Owner)
-            .WithMany()
-            .HasForeignKey(o => o.OwnerId)
-            .OnDelete(DeleteBehavior.Restrict);
         
         builder.HasMany(o => o.Members)
             .WithOne(om => om.Organization)

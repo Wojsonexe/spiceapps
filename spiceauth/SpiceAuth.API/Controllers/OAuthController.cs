@@ -64,7 +64,12 @@ public sealed class OAuthController : ControllerBase
             returnUrl = null;
         }
 
-        return Content(LoginPage(returnUrl), "text/html");
+        var frontendUrl = _configuration["App:FrontendUrl"] ?? "http://localhost:3002";
+        var loginUrl = string.IsNullOrEmpty(returnUrl)
+            ? $"{frontendUrl}/login"
+            : $"{frontendUrl}/login?returnUrl={Uri.EscapeDataString(returnUrl)}";
+
+        return Redirect(loginUrl);
     }
 
     [HttpPost("account/login")]

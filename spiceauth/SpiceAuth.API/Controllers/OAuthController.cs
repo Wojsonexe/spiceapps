@@ -246,7 +246,7 @@ public sealed class OAuthController : ControllerBase
                 return RedirectToError(redirectUri, "invalid_request", "nonce is required when using openid scope", state);
             }
 
-            if (client.RequireConsent && !await _oauthService.HasUserConsentedAsync(userId, client.Id, scope))
+            if (client.RequireConsent)
                 return ShowConsentScreen(client, redirectUri, scope, state, codeChallenge, codeChallengeMethod, nonce);
 
             var authCode = await _oauthService.CreateAuthorizationCodeAsync(

@@ -14,23 +14,6 @@ public record AuthorizationRequest
     public string? ResponseMode { get; init; }
 }
 
-// Token request
-public sealed class TokenRequest
-{
-    public required string GrantType { get; init; }
-
-    public string? Code { get; init; }
-    public string? RedirectUri { get; init; }
-    public string? RefreshToken { get; init; }
-
-    public required string ClientId { get; init; }
-    public string? ClientSecret { get; init; }
-
-    public string? CodeVerifier { get; init; }
-    
-    public string? Scope { get; init; }
-}
-
 // Token response
 public record TokenResponse
 {
@@ -74,6 +57,6 @@ public record ConsentRequest
 
 public record OAuthErrorResponse(string Error, string? ErrorDescription = null)
 {
-    public string error { get; init; } = Error;
-    public string? error_description { get; init; } = ErrorDescription;
+    public string Error { get; init; } = Error;
+    public string? ErrorDescription { get; init; } = ErrorDescription;
 }

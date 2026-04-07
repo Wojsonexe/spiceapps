@@ -1,5 +1,4 @@
-﻿using SpiceAuth.Core.Entities.Identity;
-using SpiceAuth.Core.Enums;
+﻿using SpiceAuth.Core.Enums;
 
 namespace SpiceAuth.Core.Entities.Organization;
 
@@ -9,11 +8,11 @@ public class OrganizationInvitation : BaseEntity
     public string Email { get; set; } = null!;
     public OrganizationRole Role { get; set; }
     public Guid InvitedByUserId { get; set; }
-    public string Token { get; set; } = null!;
+    public string Token { get; set; } = null!;          // Secure random token
     public DateTime ExpiresAt { get; set; }
     public DateTime? AcceptedAt { get; set; }
     public bool IsRevoked { get; set; }
-    
-    // Navigation properties
+
+    // Navigation
     public Organization Organization { get; set; } = null!;
 }

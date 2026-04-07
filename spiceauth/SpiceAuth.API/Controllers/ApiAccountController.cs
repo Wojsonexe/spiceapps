@@ -52,16 +52,10 @@ public class ApiAccountController(
 
             return Unauthorized(new { error = result.Message });
         }
-
-
+        
         return Ok(new {
             accessToken  = result.AccessToken,
             refreshToken = result.RefreshToken,
-            user = new {
-                id = result.UserId,
-                email = result.Email,
-                username = result.Username
-            }
         });
     }
 
@@ -90,11 +84,6 @@ public class ApiAccountController(
         return Ok(new {
             accessToken  = loginResult.AccessToken,
             refreshToken = loginResult.RefreshToken,
-            user = new {
-                id = loginResult.UserId,
-                email = loginResult.Email,
-                username = loginResult.Username
-            }
         });
     }
 

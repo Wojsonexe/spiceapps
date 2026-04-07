@@ -31,7 +31,7 @@ public class ExternalAuthService(
 
         if (existing != null)
         {
-            var knownUser = await userManager.FindByIdAsync(existing.ApplicationUserId.ToString());
+            var knownUser = await userManager.FindByIdAsync(existing.UserId.ToString());
             if (knownUser == null)
                 return new ExternalAuthResult(false, null, null, "Konto użytkownika nie istnieje", null);
 
@@ -100,7 +100,7 @@ public class ExternalAuthService(
         }
 
         var existingLink = await context.Set<ExternalIdentity>()
-            .AnyAsync(e => e.ApplicationUserId == userId && e.Provider == provider);
+            .AnyAsync(e => e.UserId == userId && e.Provider == provider);
 
         if (existingLink)
         {
@@ -121,7 +121,7 @@ public class ExternalAuthService(
         if (string.IsNullOrEmpty(user.PasswordHash))
         {
             var providerCount = await context.Set<ExternalIdentity>()
-                .CountAsync(e => e.ApplicationUserId == userId);
+                .CountAsync(e => e.UserId == userId);
 
             if (providerCount <= 1)
             {
@@ -133,7 +133,7 @@ public class ExternalAuthService(
         }
 
         var identity = await context.Set<ExternalIdentity>()
-            .FirstOrDefaultAsync(e => e.ApplicationUserId == userId && e.Provider == provider);
+            .FirstOrDefaultAsync(e => e.UserId == userId && e.Provider == provider);
 
         if (identity == null) return false;
 
@@ -146,7 +146,7 @@ public class ExternalAuthService(
 
     public async Task<List<LinkedProviderDto>> GetLinkedProvidersAsync(Guid userId)
         => await context.Set<ExternalIdentity>()
-            .Where(e => e.ApplicationUserId == userId)
+            .Where(e => e.UserId == userId)
             .Select(e => new LinkedProviderDto(
                 e.Provider,
                 e.ProviderUserId,
@@ -209,7 +209,6 @@ public class ExternalAuthService(
         var identity = new ExternalIdentity
         {
             UserId            = userId,
-            ApplicationUserId = userId,
             Provider          = provider,
             ProviderUserId    = providerUserId,
             ProviderUsername  = username,

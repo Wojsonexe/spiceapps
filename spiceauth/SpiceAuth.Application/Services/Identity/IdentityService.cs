@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SpiceAuth.Application.Common;
 using SpiceAuth.Application.DTOs.Auth;
@@ -16,11 +17,14 @@ public sealed class IdentityService(
     UserManager<ApplicationUser> userManager,
     ITokenService tokenService,
     IEmailService emailService,
+    IConfiguration configuration,
     ILogger<IdentityService> logger) : IIdentityService
 {
     private const int MaxFailedLoginAttempts = 5;
     private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan FailedLoginWindow = TimeSpan.FromMinutes(15);
+    private int AccessTokenLifetime =>
+        int.TryParse(configuration["Jwt:AccessTokenLifetime"], out var val) ? val : 900;
 
     public async Task<LoginResponse> AuthenticateAsync(string email, string password, string ipAddress, string userAgent)
     {
@@ -114,12 +118,12 @@ public sealed class IdentityService(
         var userRoles = await userManager.GetRolesAsync(user);
         var tokenRequest = new TokenRequest
         {
-            UserId = user.Id,
+            UserId   = user.Id,
             ClientId = defaultClient.Id,
-            Scope = "openid profile email",
-            OrganizationId = null,
-            Roles = userRoles.ToList(),
-            Nonce = null
+            Scope    = "openid profile email",
+            Roles    = userRoles.ToList(),
+            Nonce    = null,
+            Audience = "spiceauth"
         };
 
         var accessToken = await tokenService.GenerateAccessTokenAsync(tokenRequest);
@@ -135,12 +139,9 @@ public sealed class IdentityService(
         return new LoginResponse
         {
             Success = true,
-            Message = "Login successful",
             AccessToken = accessToken,
             RefreshToken = refreshToken,
-            UserId = user.Id,
-            Email = user.Email,
-            Username = user.UserName
+            ExpiresIn    = defaultClient.AccessTokenLifetime
         };
     }
 
@@ -595,33 +596,31 @@ public sealed class IdentityService(
             return new LoginResponse { Success = false, Message = "User not found or inactive" };
 
         stored.IsRevoked = true;
-        stored.IsUsed = true;
+        stored.IsUsed    = true;
 
         var userRoles = await userManager.GetRolesAsync(user);
         var tokenRequest = new TokenRequest
         {
-            UserId = user.Id,
+            UserId   = user.Id,
             ClientId = stored.ClientId,
-            Scope = stored.Scope,
-            Roles = userRoles.ToList()
+            Scope    = stored.Scope,
+            Roles    = userRoles.ToList()
         };
 
-        var newAccessToken = await tokenService.GenerateAccessTokenAsync(tokenRequest);
+        var newAccessToken  = await tokenService.GenerateAccessTokenAsync(tokenRequest);
         var newRefreshToken = await tokenService.GenerateRefreshTokenAsync(user.Id, stored.ClientId, stored.Scope);
 
         user.LastLoginAt = DateTime.UtcNow;
-        user.UpdatedAt = DateTime.UtcNow;
+        user.UpdatedAt   = DateTime.UtcNow;
         await userManager.UpdateAsync(user);
         await context.SaveChangesAsync();
 
         return new LoginResponse
         {
-            Success = true,
-            AccessToken = newAccessToken,
+            Success      = true,
+            AccessToken  = newAccessToken,
             RefreshToken = newRefreshToken,
-            UserId = user.Id,
-            Email = user.Email,
-            Username = user.UserName
+            ExpiresIn    = AccessTokenLifetime
         };
     }
 
@@ -636,27 +635,21 @@ public sealed class IdentityService(
     {
         var cutoff = DateTime.UtcNow.AddDays(-7);
 
-        var expiredEmailTokens = await context.Set<EmailVerificationToken>()
+        var emailCount = await context.Set<EmailVerificationToken>()
             .Where(t => t.ExpiresAt < cutoff || (t.IsUsed && t.UsedAt < cutoff))
-            .ToListAsync();
+            .ExecuteDeleteAsync();
 
-        var expiredPasswordTokens = await context.Set<PasswordResetToken>()
+        var passwordCount = await context.Set<PasswordResetToken>()
             .Where(t => t.ExpiresAt < cutoff || (t.IsUsed && t.UsedAt < cutoff))
-            .ToListAsync();
+            .ExecuteDeleteAsync();
 
-        var oldLoginAttempts = await context.Set<LoginAttempt>()
+        var attemptCount = await context.Set<LoginAttempt>()
             .Where(a => a.AttemptedAt < cutoff)
-            .ToListAsync();
-
-        context.Set<EmailVerificationToken>().RemoveRange(expiredEmailTokens);
-        context.Set<PasswordResetToken>().RemoveRange(expiredPasswordTokens);
-        context.Set<LoginAttempt>().RemoveRange(oldLoginAttempts);
-
-        await context.SaveChangesAsync();
+            .ExecuteDeleteAsync();
 
         logger.LogInformation(
             "Cleaned up {EmailTokens} email tokens, {PasswordTokens} password tokens, {LoginAttempts} login attempts",
-            expiredEmailTokens.Count, expiredPasswordTokens.Count, oldLoginAttempts.Count);
+            emailCount, passwordCount, attemptCount);
     }
 
     #endregion

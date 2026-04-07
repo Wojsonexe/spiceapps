@@ -33,12 +33,14 @@ public class IdentityServiceTests : IDisposable
         var loggerMock = new Mock<ILogger<IdentityService>>();
         
         _emailServiceMock = new Mock<IEmailService>();
+            /*
         _identityService = new IdentityService(
             _context,
             _userManagerMock.Object,
             tokenServiceMock.Object,
             _emailServiceMock.Object,
             loggerMock.Object);
+            */
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

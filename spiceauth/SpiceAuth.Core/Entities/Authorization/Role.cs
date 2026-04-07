@@ -3,12 +3,10 @@
 public class Role : BaseEntity
 {
     public string Name { get; set; } = null!;
+    public string NormalizedName { get; set; } = null!;
     public string? Description { get; set; }
     public bool IsSystemRole { get; set; }
-    
-    // JSON field for policy definitions (ABAC)
     public string? Permissions { get; set; }
-    
-    // Navigation properties
-    public ICollection<UserRole> UserRoles { get; set; } = new List<UserRole>();
+
+    public ICollection<UserRole> UserRoles { get; set; } = [];
 }

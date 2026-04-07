@@ -3,16 +3,15 @@
 public class ExternalIdentity : BaseEntity
 {
     public Guid UserId { get; set; }
-    public string Provider { get; set; } = null!; // "discord", "google", "github"
+    public string Provider { get; set; } = null!;       // "discord" | "google" | "github"
     public string ProviderUserId { get; set; } = null!;
     public string? ProviderUsername { get; set; }
     public string? ProviderEmail { get; set; }
-    public string? AccessToken { get; set; } // Encrypted
-    public string? RefreshToken { get; set; } // Encrypted
+    public string? AccessToken { get; set; }            // Encrypted at rest
+    public string? RefreshToken { get; set; }           // Encrypted at rest
     public DateTime? ExpiresAt { get; set; }
-    public DateTime LinkedAt { get; set; }
-    
+    public DateTime LinkedAt { get; set; } = DateTime.UtcNow;
+
     // Navigation
-    public Guid ApplicationUserId { get; set; }
-    public ApplicationUser? ApplicationUser { get; set; }
+    public ApplicationUser User { get; set; } = null!;
 }

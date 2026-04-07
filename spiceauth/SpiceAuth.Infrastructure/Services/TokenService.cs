@@ -30,11 +30,7 @@ public class TokenService(
 
     private int RefreshTokenLifetime =>
         int.TryParse(_configuration["Jwt:RefreshTokenLifetime"], out var val) ? val : 604800;
-
-    // ============================================================
-    // ACCESS TOKEN
-    // ============================================================
-
+    
     public async Task<string> GenerateAccessTokenAsync(TokenRequest request)
     {
         var key = await _keyManagement.GetActiveKeyAsync();
@@ -52,61 +48,76 @@ public class TokenService(
             }
         };
 
-        var now = DateTime.UtcNow;
+        var now     = DateTime.UtcNow;
         var expires = now.AddSeconds(AccessTokenLifetime);
+
+        var user = await _context.Set<ApplicationUser>()
+            .FirstOrDefaultAsync(u => u.Id == request.UserId);
 
         var claims = new List<Claim>
         {
-            new(JwtRegisteredClaimNames.Sub, request.UserId.ToString()),
-            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-            new(
-                JwtRegisteredClaimNames.Iat,
+            new(JwtRegisteredClaimNames.Sub,
+                request.UserId.ToString()),
+            new(JwtRegisteredClaimNames.Jti,
+                Guid.NewGuid().ToString()),
+            new(JwtRegisteredClaimNames.Iat,
                 new DateTimeOffset(now).ToUnixTimeSeconds().ToString(),
                 ClaimValueTypes.Integer64),
             new("client_id", request.ClientId.ToString()),
-            new("scope", request.Scope)
+            new("scope",     request.Scope),
         };
 
-        if (request.Roles != null && request.Roles.Any())
+        if (user != null)
+        {
+            if (!string.IsNullOrEmpty(user.Email))
+                claims.Add(new(JwtRegisteredClaimNames.Email, user.Email));
+
+            if (!string.IsNullOrEmpty(user.FirstName))
+                claims.Add(new(JwtRegisteredClaimNames.GivenName, user.FirstName));
+
+            if (!string.IsNullOrEmpty(user.LastName))
+                claims.Add(new(JwtRegisteredClaimNames.FamilyName, user.LastName));
+
+            claims.Add(new("department",   user.Department.ToString()));
+            claims.Add(new("is_approved",  user.IsApproved.ToString().ToLower()));
+
+            if (!string.IsNullOrEmpty(user.DiscordId))
+                claims.Add(new("discord_id", user.DiscordId));
+        }
+
+        if (request.Roles?.Any() == true)
         {
             foreach (var role in request.Roles)
-            {
-                claims.Add(new Claim(ClaimTypes.Role, role));
-            }
+                claims.Add(new(ClaimTypes.Role, role));
         }
 
+        // Org
         if (request.OrganizationId.HasValue)
-        {
-            claims.Add(new Claim("org_id", request.OrganizationId.Value.ToString()));
-        }
+            claims.Add(new("org_id", request.OrganizationId.Value.ToString()));
 
+        // Nonce (OIDC)
         if (!string.IsNullOrEmpty(request.Nonce))
-        {
-            claims.Add(new Claim(JwtRegisteredClaimNames.Nonce, request.Nonce));
-        }
+            claims.Add(new(JwtRegisteredClaimNames.Nonce, request.Nonce));
 
         var descriptor = new SecurityTokenDescriptor
         {
-            Subject = new ClaimsIdentity(claims),
-            Issuer = Issuer,
-            Audience = "spiceauth",
-            NotBefore = now,
-            Expires = expires,
+            Subject    = new ClaimsIdentity(claims),
+            Issuer     = Issuer,
+            Audience   = request.Audience,
+            NotBefore  = now,
+            Expires    = expires,
             SigningCredentials = signingCredentials
         };
 
         var handler = new JwtSecurityTokenHandler();
-        var token = handler.CreateToken(descriptor);
+        var token   = handler.CreateToken(descriptor);
 
         if (token is JwtSecurityToken jwt)
-        {
             jwt.Header["kid"] = key.KeyId;
-        }
 
         _logger.LogDebug(
-            "Generated access token for user {UserId}, client {ClientId}",
-            request.UserId,
-            request.ClientId);
+            "Generated access token for user {UserId}, client {ClientId}, audience {Audience}",
+            request.UserId, request.ClientId, request.Audience);
 
         return handler.WriteToken(token);
     }

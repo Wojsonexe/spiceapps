@@ -1,13 +1,19 @@
+
+
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.IdentityModel.Tokens;
 using SpiceAuth.Application.DTOs.OAuth;
 using SpiceAuth.Application.Exceptions;
 using SpiceAuth.Application.Services.Identity;
 using SpiceAuth.Application.Services.Token;
+using SpiceAuth.Core.Entities.Identity;
 using SpiceAuth.Core.Entities.OAuth;
 using SpiceAuth.Core.Enums;
+using TokenRequest = SpiceAuth.Application.Services.Token.TokenRequest;
 
 namespace SpiceAuth.Application.Services.OAuth;
 
@@ -15,12 +21,15 @@ public  class OAuthService(
     DbContext context,
     IIdentityStore identity,
     ITokenService tokenService,
-    ILogger<OAuthService> logger) : IOAuthService
+    ILogger<OAuthService> logger,
+    UserManager<ApplicationUser> userManager) : IOAuthService
 {
     private readonly DbContext _context = context;
     private readonly IIdentityStore _identity = identity;
     private readonly ITokenService _tokenService = tokenService;
     private readonly ILogger<OAuthService> _logger = logger;
+    private readonly UserManager<ApplicationUser> _userManager = userManager;
+    
 
     public Task<TokenResponse> RefreshTokenAsync(string refreshToken, Guid clientId)
         => RefreshInternalAsync(refreshToken, clientId);
@@ -54,7 +63,6 @@ public  class OAuthService(
         if (client == null || !client.IsActive)
             throw new OAuthException("invalid_client", "Invalid client");
 
-        // ✅ Confidential client wymaga sekretu
         if (client.ClientType == ClientType.Confidential)
         {
             if (string.IsNullOrEmpty(clientSecret) || string.IsNullOrEmpty(client.ClientSecretHash))
@@ -71,7 +79,7 @@ public  class OAuthService(
         
         var client = await GetClientByClientIdAsync(clientId);
         
-        var tokenRequest = new Token.TokenRequest
+        var tokenRequest = new TokenRequest
         {
             ClientId = client!.Id,
             Scope = string.Join(" ", client.AllowedScopes)
@@ -143,7 +151,7 @@ public  class OAuthService(
         var redirectUri = redirectUris.FirstOrDefault() ?? "http://localhost";
 
         var authCode = await CreateAuthorizationCodeAsync(userId, client.Id, redirectUri, scope);
-        return await ExchangeAuthorizationCodeAsync(authCode.Code, client.Id, redirectUri);
+        return await ExchangeAuthorizationCodeAsync(authCode.Code, client.Id, redirectUri, null);
     }
     
     public async Task<TokenResponse?> RotateRefreshTokenAsync(string refreshToken, string clientId)
@@ -169,7 +177,6 @@ public  class OAuthService(
         var authCode = await GetAuthorizationCodeAsync(code);
         if (authCode == null || authCode.ClientId != client.Id) return null;
 
-        // PKCE check
         if (!string.IsNullOrEmpty(authCode.CodeChallenge) && !string.IsNullOrEmpty(codeVerifier))
         {
             if (!ValidatePkce(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod))
@@ -243,77 +250,77 @@ public  class OAuthService(
         string code,
         Guid clientId,
         string redirectUri,
-        string? codeVerifier = null)
+        string? codeVerifier)
     {
-        var authCode = await GetAuthorizationCodeAsync(code);
+        var authCode = await _context.Set<AuthorizationCode>()
+            .FirstOrDefaultAsync(c => c.Code == code && !c.IsUsed);
 
-        if (authCode == null || !await ValidateAuthorizationCodeAsync(code, clientId, redirectUri))
-        {
-            throw new InvalidOperationException("Invalid authorization code");
-        }
+        if (authCode == null || authCode.ExpiresAt < DateTime.UtcNow)
+            throw new InvalidOperationException("Authorization code is invalid or expired");
 
-        // Validate PKCE if code challenge was provided
+        if (authCode.ClientId != clientId)
+            throw new InvalidOperationException("Client mismatch");
+
+        if (!string.IsNullOrEmpty(authCode.RedirectUri) &&
+            authCode.RedirectUri != redirectUri)
+            throw new InvalidOperationException("redirect_uri mismatch");
+
         if (!string.IsNullOrEmpty(authCode.CodeChallenge))
         {
             if (string.IsNullOrEmpty(codeVerifier))
-            {
-                throw new InvalidOperationException("Code verifier required");
-            }
+                throw new InvalidOperationException("code_verifier is required");
 
-            if (!ValidatePkce(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod))
-            {
-                throw new InvalidOperationException("Invalid code verifier");
-            }
+            using var sha256  = SHA256.Create();
+            var verifierBytes = Encoding.ASCII.GetBytes(codeVerifier);
+            var challengeBytes = sha256.ComputeHash(verifierBytes);
+            var computedChallenge = Base64UrlEncoder.Encode(challengeBytes);
+
+        if (computedChallenge != authCode.CodeChallenge)
+                throw new InvalidOperationException("code_verifier does not match code_challenge");
         }
 
-        // Mark code as used
-        await MarkAuthorizationCodeAsUsedAsync(code);
+        authCode.IsUsed  = true;
+        authCode.UsedAt  = DateTime.UtcNow;
 
-        // Get user roles
-        // var user = await _identityService.GetUserByIdAsync(authCode.UserId);
-        var roles = await _context.Set<Core.Entities.Authorization.UserRole>()
-            .Where(ur => ur.UserId == authCode.UserId)
-            .Include(ur => ur.Role)
-            .Select(ur => ur.Role.Name)
-            .ToListAsync();
+        var user = await _userManager.FindByIdAsync(authCode.UserId.ToString())
+            ?? throw new InvalidOperationException("User not found");
 
-        // Generate tokens
-        var tokenRequest = new Token.TokenRequest
+        var userRoles = await _userManager.GetRolesAsync(user);
+
+        var audience = ResolveAudience(authCode.Scope);
+
+        var tokenRequest = new TokenRequest
         {
-            UserId = authCode.UserId,
-            ClientId = authCode.ClientId,
-            Scope = authCode.Scope,
-            Roles = roles,
-            Nonce = authCode.Nonce
+            UserId   = authCode.UserId,
+            ClientId = clientId,
+            Scope    = authCode.Scope ?? "openid profile",
+            Roles    = userRoles.ToList(),
+            Nonce    = authCode.Nonce,
+            Audience = audience  
         };
 
-        var accessToken = await _tokenService.GenerateAccessTokenAsync(tokenRequest);
+        var accessToken  = await _tokenService.GenerateAccessTokenAsync(tokenRequest);
         var refreshToken = await _tokenService.GenerateRefreshTokenAsync(
-            authCode.UserId,
-            authCode.ClientId,
-            authCode.Scope);
+            authCode.UserId, clientId, authCode.Scope ?? "openid profile");
 
         string? idToken = null;
-        if (authCode.Scope.Contains("openid") && !string.IsNullOrEmpty(authCode.Nonce))
+        if (!string.IsNullOrEmpty(authCode.Nonce) && (authCode.Scope?.Contains("openid") ?? false))
         {
             idToken = await _tokenService.GenerateIdTokenAsync(
-                authCode.UserId,
-                authCode.ClientId,
-                authCode.Nonce);
+                authCode.UserId, clientId,
+                authCode.Nonce, [clientId.ToString()]);
         }
 
-        _logger.LogInformation(
-            "Exchanged authorization code for tokens: user {UserId}, client {ClientId}",
-            authCode.UserId, authCode.ClientId);
+        await _context.SaveChangesAsync();
 
         return new TokenResponse
         {
-            AccessToken = accessToken,
-            TokenType = "Bearer",
-            ExpiresIn = 900, // 15 minutes
+            AccessToken  = accessToken,
             RefreshToken = refreshToken,
-            IdToken = idToken,
-            Scope = authCode.Scope
+            IdToken      = idToken,
+            TokenType    = "Bearer",
+            ExpiresIn    = 900,
+            Scope        = authCode.Scope
         };
     }
     
@@ -348,18 +355,15 @@ public  class OAuthService(
             throw new InvalidOperationException("Refresh token expired");
         }
 
-        // Mark old token as used
         storedToken.IsUsed = true;
 
-        // Get user roles
         var roles = await _context.Set<Core.Entities.Authorization.UserRole>()
             .Where(ur => ur.UserId == storedToken.UserId)
             .Include(ur => ur.Role)
             .Select(ur => ur.Role.Name)
             .ToListAsync();
 
-        // Generate new tokens
-        var tokenRequest = new Token.TokenRequest
+        var tokenRequest = new TokenRequest
         {
             UserId = storedToken.UserId,
             ClientId = storedToken.ClientId,
@@ -419,9 +423,13 @@ public  class OAuthService(
             return false;
         }
 
-        // If client secret provided, validate it
         if (!string.IsNullOrEmpty(clientSecret))
         {
+            if (string.IsNullOrEmpty(client.ClientSecretHash))
+            {
+                return false;
+            }
+
             return VerifyClientSecret(clientSecret, client.ClientSecretHash);
         }
 
@@ -776,5 +784,16 @@ public  class OAuthService(
         _logger.LogInformation(
             "Client {ClientId} status set to {Status} by user {UserId}",
             client.ClientId, isActive ? "Active" : "Inactive", updatedByUserId);
+    }
+    
+    private static string ResolveAudience(string? scope)
+    {
+        if (string.IsNullOrEmpty(scope)) return "spiceapi";
+
+        if (scope.Split(' ').Any(s =>
+                s == "spiceapi" || s.StartsWith("spiceapi:")))
+            return "spiceapi";
+
+        return "spiceauth";
     }
 }

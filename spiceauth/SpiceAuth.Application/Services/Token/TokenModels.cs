@@ -2,14 +2,15 @@ using SpiceAuth.Core.Entities.Security;
 
 namespace SpiceAuth.Application.Services.Token;
 
-public record TokenRequest
+public class TokenRequest
 {
-    public Guid UserId { get; init; }
-    public Guid ClientId { get; init; }
-    public string Scope { get; init; } = null!;
-    public Guid? OrganizationId { get; init; }
-    public List<string>? Roles { get; init; }
-    public string? Nonce { get; init; }
+    public Guid         UserId         { get; set; }
+    public Guid         ClientId       { get; set; }
+    public string       Scope          { get; set; } = string.Empty;
+    public List<string>? Roles         { get; set; }
+    public Guid?        OrganizationId { get; set; }
+    public string?      Nonce          { get; set; }
+    public string       Audience       { get; set; } = "spiceapi";
 }
 
 public record TokenResult

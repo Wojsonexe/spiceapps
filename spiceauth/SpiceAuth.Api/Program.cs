@@ -289,12 +289,13 @@ builder.Services.AddScoped<DbContext>(provider =>
     provider.GetRequiredService<ApplicationDbContext>());
 builder.Services.AddScoped<IIdentityStore, IdentityStore>();
 
-builder.Services.AddScoped<IPasswordHasher<ApplicationUser>, BcryptPasswordHasher<ApplicationUser>>();
+builder.Services.AddScoped<IPasswordHasher<ApplicationUser>, SmartPasswordHasher<ApplicationUser>>();
 builder.Services.AddScoped<IAuditService, AuditService>();
 builder.Services.AddScoped<MfaService>();
 builder.Services.AddScoped<IExternalAuthService, ExternalAuthService>();
 
 builder.Services.AddScoped<IIdentityService, IdentityService>();
+builder.Services.AddScoped<UserMigrationService>();
 builder.Services.AddScoped<IOAuthService, OAuthService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IKeyManagementService, KeyManagementService>();
@@ -389,6 +390,7 @@ if (app.Environment.IsDevelopment())
         await SeedTestOAuthClientAsync(context);
         await SeedInternalClientAsync(context);
         await SeedKaczuchaPanelClientAsync(context);
+        await SeedSpiceApiWebClientAsync(context);
 
         var keyService = scope.ServiceProvider.GetRequiredService<IKeyManagementService>();
         await keyService.GetActiveKeyAsync();
@@ -664,5 +666,54 @@ static async Task SeedKaczuchaPanelClientAsync(ApplicationDbContext context)
         });
         await context.SaveChangesAsync();
         Log.Information("✅ Kaczucha Panel client created: {ClientId}", clientId);
+    }
+}
+
+static async Task SeedSpiceApiWebClientAsync(ApplicationDbContext context)
+{
+    var clientId = "spiceapi-web";
+    if (!await context.OAuthClients.AnyAsync(c => c.ClientId == clientId))
+    {
+        context.OAuthClients.Add(new OAuthClient
+        {
+            Id                   = Guid.Parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
+            ClientId             = clientId,
+            ClientSecretHash     = "PUBLIC_CLIENT_NO_SECRET",
+            Name                 = "SpiceGears Web App",
+            Description          = "Frontend aplikacji SpiceGears",
+            ClientType           = ClientType.Public,
+            IsActive             = true,
+            RequirePkce          = true,
+            RequireConsent       = false,
+            RedirectUris         = JsonSerializer.Serialize(new[]
+            {
+                "http://localhost:3000/callback",
+                "http://localhost:5173/callback",
+                "https://app.team5883.pl/callback"
+            }),
+            AllowedScopes        = JsonSerializer.Serialize(new[]
+            {
+                "openid", "profile", "email",
+                "spiceapi",
+                "spiceapi:admin",
+                "spiceapi:kitchen",
+                "spiceapi:projects",
+                "spiceapi:tasks",
+                "spiceapi:files",
+                "spiceapi:roles"
+            }),
+            AllowedGrantTypes    = JsonSerializer.Serialize(new[]
+            {
+                "authorization_code",
+                "refresh_token"
+            }),
+            AccessTokenLifetime  = 900,
+            RefreshTokenLifetime = 604800,
+            CreatedByUserId      = Guid.Parse("719141ef-0968-44a4-8f01-49e26a4d1423"),
+            CreatedAt            = DateTime.UtcNow
+        });
+
+        await context.SaveChangesAsync();
+        Log.Information("✅ SpiceAPI Web client created: {ClientId}", clientId);
     }
 }

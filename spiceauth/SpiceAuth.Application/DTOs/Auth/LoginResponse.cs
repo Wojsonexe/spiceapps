@@ -9,7 +9,5 @@ public record LoginResponse
     public string? MfaToken { get; init; }
     public string? AccessToken { get; init; }
     public string? RefreshToken { get; init; }
-    public Guid? UserId { get; init; }
-    public string? Email { get; init; }
-    public string? Username { get; init; }
+    public int ExpiresIn { get; init; }
 }

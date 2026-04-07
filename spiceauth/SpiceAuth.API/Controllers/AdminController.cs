@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
+using SpiceAuth.API.Services;
 using SpiceAuth.Application.Services.Audit;
 using SpiceAuth.Application.Services.Identity;
 using SpiceAuth.Core.Entities.Security;
@@ -180,5 +181,24 @@ public class AdminController(
 
         _logger.LogInformation("Admin {Actor} activated user {UserId}", actorEmail, id);
         return NoContent();
+    }
+    
+    [HttpPost("migrate-users")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> MigrateUsers(
+        [FromServices] UserMigrationService migrationService)
+    {
+        _logger.LogWarning("User migration triggered by {UserId}",
+            User.FindFirstValue(ClaimTypes.NameIdentifier));
+
+        var report = await migrationService.MigrateAsync();
+
+        return Ok(new
+        {
+            report.Migrated,
+            report.Skipped,
+            report.Failed,
+            report.Errors
+        });
     }
 }

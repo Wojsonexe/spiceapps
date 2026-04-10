@@ -175,9 +175,9 @@ public class ExternalAuthService(
             UserId   = user.Id,
             ClientId = client.Id,
             Scope    = "openid profile email",
-            Roles    = roles.ToList()
+            Roles    = roles.ToArray()
         };
-
+        
         var accessToken  = await tokenService.GenerateAccessTokenAsync(tokenRequest);
         var refreshToken = await tokenService.GenerateRefreshTokenAsync(
             user.Id, client.Id, "openid profile email");

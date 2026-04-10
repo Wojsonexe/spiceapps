@@ -182,7 +182,7 @@ public class ApplicationDbContext
             e.ToTable("refresh_tokens");
             e.HasKey(rt => rt.Id);
 
-            e.HasOne(rt => rt.User)
+            e.HasOne<ApplicationUser>()
                 .WithMany(u => u.RefreshTokens)
                 .HasForeignKey(rt => rt.UserId)
                 .OnDelete(DeleteBehavior.Cascade);

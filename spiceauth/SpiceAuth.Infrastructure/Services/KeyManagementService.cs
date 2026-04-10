@@ -61,7 +61,7 @@ public class KeyManagementService(
             KeyId = keyId,
             Algorithm = "RS256",
             PublicKey = publicKey,
-            PrivateKey = privateKey, // TODO: Encrypt at rest
+            PrivateKey = privateKey,
             IsActive = true,
             CreatedAt = DateTime.UtcNow,
             ActivatedAt = DateTime.UtcNow,

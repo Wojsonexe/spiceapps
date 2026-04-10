@@ -97,8 +97,7 @@ public sealed class IdentityService(
             {
                 Success = false,
                 RequiresMfa = true,
-                MfaToken = "TODO_GENERATE_MFA_TOKEN",
-                Message = "MFA required"
+                Message = "TODO_GENERATE_MFA_TOKEN"
             };
         }
 
@@ -121,9 +120,8 @@ public sealed class IdentityService(
             UserId   = user.Id,
             ClientId = defaultClient.Id,
             Scope    = "openid profile email",
-            Roles    = userRoles.ToList(),
+            Roles    = userRoles.ToArray(),
             Nonce    = null,
-            Audience = "spiceauth"
         };
 
         var accessToken = await tokenService.GenerateAccessTokenAsync(tokenRequest);
@@ -604,7 +602,7 @@ public sealed class IdentityService(
             UserId   = user.Id,
             ClientId = stored.ClientId,
             Scope    = stored.Scope,
-            Roles    = userRoles.ToList()
+            Roles    = userRoles.ToArray()
         };
 
         var newAccessToken  = await tokenService.GenerateAccessTokenAsync(tokenRequest);

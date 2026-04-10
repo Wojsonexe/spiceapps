@@ -4,13 +4,12 @@ namespace SpiceAuth.Application.Services.Token;
 
 public class TokenRequest
 {
-    public Guid         UserId         { get; set; }
-    public Guid         ClientId       { get; set; }
-    public string       Scope          { get; set; } = string.Empty;
-    public List<string>? Roles         { get; set; }
-    public Guid?        OrganizationId { get; set; }
-    public string?      Nonce          { get; set; }
-    public string       Audience       { get; set; } = "spiceapi";
+    public Guid UserId { get; set; }
+    public Guid ClientId { get; set; }
+    public string? Scope { get; set; }
+    public string[]? Roles { get; set; }
+    public Guid? OrganizationId { get; set; }
+    public string? Nonce { get; set; }
 }
 
 public record TokenResult
@@ -23,7 +22,17 @@ public record TokenResult
     public string Scope { get; init; } = null!;
 }
 
-public record JwksResponse
+public class JwksResponse
 {
-    public List<JsonWebKey> Keys { get; init; } = [];
+    public List<JwkKey> Keys { get; set; } = new();
+}
+
+public class JwkKey
+{
+    public string Kty { get; set; } = "RSA";
+    public string Use { get; set; } = "sig";
+    public string Kid { get; set; } = null!;
+    public string Alg { get; set; } = "RS256";
+    public string N { get; set; } = null!;
+    public string E { get; set; } = null!;
 }

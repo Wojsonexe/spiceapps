@@ -154,7 +154,7 @@ builder.Services.AddAuthentication()
             ValidateLifetime         = true,
             ValidateIssuerSigningKey = true,
             ValidIssuer              = jwtIssuer,
-            ValidAudience            = "spiceauth",
+            ValidAudience            = "spiceapi",
             ClockSkew                = TimeSpan.Zero,
             RequireSignedTokens      = true,
             RequireExpirationTime    = true,

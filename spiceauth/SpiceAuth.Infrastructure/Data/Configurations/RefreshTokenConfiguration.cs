@@ -20,15 +20,13 @@ public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
             .IsRequired()
             .HasMaxLength(500);
 
-        // ✅ FK DO AspNetUsers:
         builder.HasOne<SpiceAuth.Core.Entities.Identity.ApplicationUser>()
             .WithMany()
             .HasForeignKey(rt => rt.UserId)
             .HasConstraintName("FK_RefreshTokens_AspNetUsers_UserId")
             .OnDelete(DeleteBehavior.Cascade);
 
-        // ✅ FK DO OAuthClients:
-        builder.HasOne(rt => rt.Client)
+        builder.HasOne<OAuthClient>()
             .WithMany()
             .HasForeignKey(rt => rt.ClientId)
             .HasConstraintName("FK_RefreshTokens_OAuthClients_ClientId")
@@ -48,7 +46,6 @@ public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
         builder.HasIndex(rt => rt.IsRevoked)
             .HasDatabaseName("IX_RefreshTokens_IsRevoked");
 
-        // Self-referencing relationship for token rotation
         builder.HasOne(rt => rt.ParentToken)
             .WithMany()
             .HasForeignKey(rt => rt.ParentTokenId)

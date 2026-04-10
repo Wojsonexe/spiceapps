@@ -1,25 +1,22 @@
-﻿// SpiceAuth.Core/Entities/OAuth/RefreshToken.cs
+﻿namespace SpiceAuth.Core.Entities.OAuth;
 
-using SpiceAuth.Core.Entities.Identity;
-
-namespace SpiceAuth.Core.Entities.OAuth;
-
-public class RefreshToken : BaseEntity
+public class RefreshToken
 {
-    public string TokenHash { get; set; } = null!;      // SHA-256 of actual token
-    public Guid ClientId { get; set; }
+    public Guid Id { get; set; }
+    public string TokenHash { get; set; } = null!;
     public Guid UserId { get; set; }
+    public Guid ClientId { get; set; }
+    public string? DeviceId { get; set; }
     public string Scope { get; set; } = null!;
-
     public bool IsRevoked { get; set; }
     public bool IsUsed { get; set; }
+    public Guid? ParentTokenId { get; set; }
+    public Guid? ReplacedByTokenId { get; set; }
+    public Guid? FamilyId { get; set; }
+    public DateTime CreatedAt { get; set; }
     public DateTime ExpiresAt { get; set; }
-
-    public Guid? ParentTokenId { get; set; }            // Token rotation chain
     public Guid? OrganizationId { get; set; }
 
-    // Navigation
-    public OAuthClient Client { get; set; } = null!;
-    public ApplicationUser User { get; set; } = null!;
+    public OAuthClient? Client { get; set; }
     public RefreshToken? ParentToken { get; set; }
 }

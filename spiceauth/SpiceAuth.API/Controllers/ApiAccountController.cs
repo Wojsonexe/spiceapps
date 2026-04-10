@@ -40,7 +40,7 @@ public class ApiAccountController(
         var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         var ua = Request.Headers.UserAgent.ToString();
 
-        var result = await identityService.AuthenticateAsync(request.Email, request.Password, ip, ua);
+        var result = await identityService.AuthenticateAsync(request.Login, request.Password, ip, ua);
 
         if (!result.Success)
         {

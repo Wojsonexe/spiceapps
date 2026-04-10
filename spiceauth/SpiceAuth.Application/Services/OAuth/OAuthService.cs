@@ -286,17 +286,14 @@ public  class OAuthService(
             ?? throw new InvalidOperationException("User not found");
 
         var userRoles = await _userManager.GetRolesAsync(user);
-
-        var audience = ResolveAudience(authCode.Scope);
-
+        
         var tokenRequest = new TokenRequest
         {
             UserId   = authCode.UserId,
             ClientId = clientId,
             Scope    = authCode.Scope ?? "openid profile",
-            Roles    = userRoles.ToList(),
+            Roles    = userRoles.ToArray(),
             Nonce    = authCode.Nonce,
-            Audience = audience  
         };
 
         var accessToken  = await _tokenService.GenerateAccessTokenAsync(tokenRequest);
@@ -368,7 +365,7 @@ public  class OAuthService(
             UserId = storedToken.UserId,
             ClientId = storedToken.ClientId,
             Scope = storedToken.Scope,
-            Roles = roles,
+            Roles = roles.ToArray(),
             OrganizationId = storedToken.OrganizationId
         };
 

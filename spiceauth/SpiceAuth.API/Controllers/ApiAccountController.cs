@@ -40,7 +40,7 @@ public class ApiAccountController(
         var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         var ua = Request.Headers.UserAgent.ToString();
 
-        var result = await identityService.AuthenticateAsync(request.Login, request.Password, ip, ua);
+        var result = await identityService.AuthenticateAsync(request.Email, request.Password, ip, ua);
 
         if (!result.Success)
         {
@@ -103,7 +103,7 @@ public class ApiAccountController(
     }
 
     [HttpPost("logout")]
-    [Authorize]
+    [Authorize(AuthenticationSchemes = "Bearer")]
     public async Task<IActionResult> Logout()
     {
         var userIdClaim = User.FindFirst("sub")?.Value;
@@ -115,7 +115,7 @@ public class ApiAccountController(
     }
     
     [HttpGet("check")]
-    [Authorize]
+    [Authorize(AuthenticationSchemes = "Bearer")]
     public IActionResult Check()
     {
         var userId = User.FindFirst("sub")?.Value ?? "";
@@ -131,7 +131,7 @@ public class ApiAccountController(
     }
 
     [HttpGet("profile")]
-    [Authorize]
+    [Authorize(AuthenticationSchemes = "Bearer")]
     public async Task<IActionResult> GetProfile()
     {
         var userId = User.FindFirst("sub")?.Value;
@@ -152,7 +152,7 @@ public class ApiAccountController(
     }
 
     [HttpPost("update-profile")]
-    [Authorize]
+    [Authorize(AuthenticationSchemes = "Bearer")]
     public async Task<IActionResult> UpdateProfile([FromBody] UpdateProfileRequest request)
     {
         var userId = User.FindFirst("sub")?.Value;

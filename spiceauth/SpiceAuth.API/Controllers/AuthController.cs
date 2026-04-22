@@ -32,25 +32,25 @@ public class AuthController(
     [AllowAnonymous]
     public async Task<ActionResult<AuthTokenResponse>> Login([FromBody] LoginRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.Login) || string.IsNullOrWhiteSpace(request.Password))
+        if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
             return BadRequest(new { error = "Email and password are required" });
 
-        _logger.LogInformation("Login attempt for {Email} from {IP}", request.Login, Ip());
+        _logger.LogInformation("Login attempt for {Email} from {IP}", request.Email, Ip());
 
-        var response = await _identityService.AuthenticateAsync(request.Login, request.Password, Ip(), Ua());
+        var response = await _identityService.AuthenticateAsync(request.Email, request.Password, Ip(), Ua());
 
         if (response is { Success: false, RequiresMfa: false })
         {
             await _auditService.LogAsync(
                 action: AuditAction.LoginFailed,
-                actorEmail: request.Login,
+                actorEmail: request.Email,
                 resourceType: "Auth",
                 success: false,
                 failureReason: "Invalid credentials",
                 ipAddress: Ip(),
                 userAgent: Ua());
 
-            _logger.LogWarning("Failed login for {Email}", request.Login);
+            _logger.LogWarning("Failed login for {Email}", request.Email);
 
             // FIX: return 401, not 400, so frontend can distinguish auth errors
             return Unauthorized(new
@@ -64,12 +64,12 @@ public class AuthController(
 
         await _auditService.LogAsync(
             action: AuditAction.Login,
-            actorEmail: request.Login,
+            actorEmail: request.Email,
             resourceType: "Auth",
             ipAddress: Ip(),
             userAgent: Ua());
 
-        _logger.LogInformation("Successful login for {Email}", request.Login);
+        _logger.LogInformation("Successful login for {Email}", request.Email);
 
         // FIX: return snake_case keys that frontend already expects
         return Ok(new AuthTokenResponse

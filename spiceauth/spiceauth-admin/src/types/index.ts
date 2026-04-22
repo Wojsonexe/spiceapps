@@ -8,11 +8,11 @@ export interface LoginRequest {
 export interface LoginResponse {
     success: boolean;
     message: string;
-    requiresMfa: boolean;
-    requiresEmailVerification: boolean;
-    accessToken: string;
-    refreshToken: string;
-    user: UserDto;
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+    token_type: string;
+    user?: UserDto;
 }
 
 export interface UserDto {

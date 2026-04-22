@@ -176,6 +176,7 @@ public sealed class OAuthController : ControllerBase
     #region AUTHORIZATION ENDPOINT (RFC 6749 § 3.1)
 
     [HttpGet("authorize")]
+    [AllowAnonymous]
     public async Task<IActionResult> Authorize(
         [FromQuery(Name = "response_type")]         string? responseType        = null,
         [FromQuery(Name = "client_id")]             string? clientId            = null,
@@ -186,6 +187,12 @@ public sealed class OAuthController : ControllerBase
         [FromQuery(Name = "code_challenge_method")] string? codeChallengeMethod = null,
         [FromQuery(Name = "nonce")]                 string? nonce               = null)
     {
+        if (!User.Identity?.IsAuthenticated ?? true)
+        {
+            var returnUrl = Request.Path + Request.QueryString;
+            return Redirect($"/api/oauth/account/login?returnUrl={Uri.EscapeDataString(returnUrl)}");
+        }
+        
         try
         {
             var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value

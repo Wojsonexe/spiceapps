@@ -130,6 +130,13 @@ builder.Services.ConfigureApplicationCookie(options =>
     
     options.Events.OnRedirectToLogin = context =>
     {
+        if (context.Request.Path.StartsWithSegments("/api") ||
+            context.Request.Headers["Accept"].ToString().Contains("application/json"))
+        {
+            context.Response.StatusCode = 401;
+            return Task.CompletedTask;
+        }
+
         var returnUrl = Uri.EscapeDataString(context.Request.Path + context.Request.QueryString);
         context.Response.Redirect($"/api/oauth/account/login?returnUrl={returnUrl}");
         return Task.CompletedTask;
@@ -196,7 +203,7 @@ builder.Services.AddAuthentication()
 builder.Services.AddAuthorization(options =>
 {
     options.DefaultPolicy = new AuthorizationPolicyBuilder()
-        .AddAuthenticationSchemes("Identity.Application")
+        .AddAuthenticationSchemes("Bearer", "Identity.Application")
         .RequireAuthenticatedUser()
         .Build();
 });
@@ -314,6 +321,7 @@ builder.Services.AddControllersWithViews()
     {
         options.JsonSerializerOptions.PropertyNamingPolicy = 
             JsonNamingPolicy.SnakeCaseLower;
+        options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
     });
 
 builder.Services.AddAntiforgery(options =>

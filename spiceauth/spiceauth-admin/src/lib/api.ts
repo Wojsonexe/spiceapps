@@ -41,9 +41,7 @@ api.interceptors.response.use(
 export const authApi = {
     login: async (payload: LoginRequest): Promise<LoginResponse> => {
         const { data } = await api.post<LoginResponse>('/api/auth/login', payload);
-        // API returns { accessToken, refreshToken, expiresIn, tokenType }
-        // Pick whichever field the backend actually sends:
-        sessionStorage.setItem('access_token', data.accessToken);
+        if (data.access_token) sessionStorage.setItem('access_token', data.access_token);
         return data;
     },
 
@@ -53,10 +51,8 @@ export const authApi = {
     },
 
     getProfile: async (): Promise<UserDto> => {
-        const { data } = await api.get<LoginResponse>('/api/auth/profile');
-        // Profile endpoint returns same shape as login on some backends,
-        // but usually returns UserDto directly — handle both:
-        return (data as unknown as UserDto).email ? (data as unknown as UserDto) : data.user;
+        const { data } = await api.get<UserDto>('/api/auth/profile');
+        return data;
     },
 
     updateProfile: async (payload: UpdateProfileRequest): Promise<UserDto> => {

@@ -27,23 +27,23 @@ public class WellKnownController(
     [ResponseCache(Duration = 3600, Location = ResponseCacheLocation.Any)]
     public ActionResult<object> GetOpenIdConfiguration()
     {
-        var baseUrl = $"{Request.Scheme}://{Request.Host}";
-        var issuer = _configuration["Jwt:Issuer"] ?? baseUrl;
+        var requestBase = $"{Request.Scheme}://{Request.Host}";
+        var issuer = _configuration["Jwt:Issuer"] ?? requestBase;
 
-        _logger.LogDebug("OpenID configuration requested from {IP}", 
+        _logger.LogDebug("OpenID configuration requested from {IP}",
             HttpContext.Connection.RemoteIpAddress);
 
         var config = new
         {
             issuer,
-            authorization_endpoint = $"{baseUrl}/oauth/authorize",
-            token_endpoint = $"{baseUrl}/oauth/token",
-            userinfo_endpoint = $"{baseUrl}/oauth/userinfo",
-            jwks_uri = $"{baseUrl}/.well-known/jwks.json",
-            registration_endpoint = $"{baseUrl}/api/clients/register",
-            revocation_endpoint = $"{baseUrl}/oauth/revoke",
-            introspection_endpoint = $"{baseUrl}/oauth/introspect",
-            end_session_endpoint = $"{baseUrl}/oauth/logout",
+            authorization_endpoint = $"{issuer}/oauth/authorize",
+            token_endpoint = $"{issuer}/oauth/token",
+            userinfo_endpoint = $"{issuer}/oauth/userinfo",
+            jwks_uri = $"{issuer}/.well-known/jwks.json",
+            registration_endpoint = $"{issuer}/api/clients/register",
+            revocation_endpoint = $"{issuer}/oauth/revoke",
+            introspection_endpoint = $"{issuer}/oauth/introspect",
+            end_session_endpoint = $"{issuer}/oauth/logout",
             
             response_types_supported = new[]
             {
@@ -96,17 +96,23 @@ public class WellKnownController(
                 "exp",
                 "iat",
                 "nbf",
-                "jti"
+                "jti",
+                "sid",
+                "nonce",
+                "roles"
             },
             
             code_challenge_methods_supported = new[] { "S256" },
-            
-            service_documentation = $"{baseUrl}/docs",
-            
+
+            backchannel_logout_supported         = true,
+            backchannel_logout_session_supported = true,
+
+            service_documentation = $"{issuer}/docs",
+
             ui_locales_supported = new[] { "en-US", "pl-PL" },
-            
-            op_policy_uri = $"{baseUrl}/privacy",
-            op_tos_uri = $"{baseUrl}/terms"
+
+            op_policy_uri = $"{issuer}/privacy",
+            op_tos_uri    = $"{issuer}/terms"
         };
 
         return Ok(config);

@@ -6,7 +6,9 @@ using Serilog;
 using SpiceAuth.Application.Services.Email;
 using SpiceAuth.Application.Services.Identity;
 using SpiceAuth.Application.Services.OAuth;
+using SpiceAuth.Application.Services.RateLimit;
 using SpiceAuth.Application.Services.Registration;
+using SpiceAuth.Application.Services.Security;
 using SpiceAuth.Application.Services.Token;
 using SpiceAuth.Infrastructure.Data;
 using SpiceAuth.Infrastructure.Services;
@@ -16,9 +18,15 @@ using SpiceAuth.Core.Entities.OAuth;
 using SpiceAuth.Core.Enums;
 using AspNetCoreRateLimit;
 using Microsoft.AspNetCore.Authorization;
+using SpiceAuth.API.Middleware;
 using SpiceAuth.API.Services;
+using SpiceAuth.Application.Abstractions.Persistence;
 using SpiceAuth.Application.Services;
 using SpiceAuth.Application.Services.Audit;
+using SpiceAuth.Application.Services.Federation;
+using SpiceAuth.Infrastructure.BackgroundServices;
+using SpiceAuth.API.Metrics;
+using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -308,7 +316,49 @@ builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IKeyManagementService, KeyManagementService>();
 builder.Services.AddScoped<IRegistrationService, RegistrationService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
+
+// ── Federation ────────────────────────────────────────────────────────────────
+builder.Services.AddScoped<IApplicationDbContext>(sp =>
+    sp.GetRequiredService<ApplicationDbContext>());
+builder.Services.AddScoped<IFederationService, FederationService>();
+
+// ── Rate limiting (internal brute-force protection) ────────────────────────
+builder.Services.AddSingleton<IRateLimitService, InMemoryRateLimitService>();
+
+// ── Security events (fire-and-forget, non-blocking) ────────────────────────
+builder.Services.AddSingleton<ISecurityEventService, SecurityEventService>();
+
+// ── PKCE validation (3A) ───────────────────────────────────────────────────
+builder.Services.AddScoped<IPkceService, PkceService>();
+
+// ── Client IP extraction with trusted-proxy CIDR whitelist (3E) ───────────
+builder.Services.AddSingleton<IClientIpService, ClientIpService>();
+
+// ── Replay cache — DB-backed, Redis-swappable (3H) ────────────────────────
+builder.Services.AddScoped<IReplayCache, DbReplayCache>();
+
+// ── SSRF protection — DNS-resolving URI validator ─────────────────────────
+builder.Services.AddSingleton<IDnsResolver, SystemDnsResolver>();
+builder.Services.AddScoped<IUriSanitizer, UriSanitizer>();
+
+// ── Location resolver — no-op default, swap for GeoLite2 when needed (3N) ─
+builder.Services.AddSingleton<ILocationResolver, NoOpLocationResolver>();
+
+// ── Prometheus metrics ─────────────────────────────────────────────────────
+builder.Services.AddSingleton<SpiceAuthMetrics>();
+
+// HttpClient used for backchannel logout dispatch — separate named client so
+// timeouts/policies don't interfere with other outbound calls.
+builder.Services.AddHttpClient("BackchannelLogout", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(10);
+    client.DefaultRequestHeaders.Add("User-Agent", "SpiceAuth/1.0 BackchannelLogout");
+});
+
 builder.Services.AddHostedService<RateLimitCleanupService>();
+builder.Services.AddHostedService<SessionCleanupService>();
+builder.Services.AddHostedService<KeyRotationService>();
+builder.Services.AddHostedService<FederationDispatchWorker>();
 
 Log.Information("✅ Services registered");
 
@@ -343,38 +393,71 @@ builder.Services.Configure<RouteOptions>(options =>
 
 builder.Services.AddEndpointsApiExplorer();
 
-if (builder.Environment.IsDevelopment())
+builder.Services.AddSwaggerGen(c =>
 {
-    builder.Services.AddSwaggerGen(c =>
+    c.SwaggerDoc("v1", new()
     {
-        c.SwaggerDoc("v1", new()
-        {
-            Title       = "SpiceAuth API",
-            Version     = "v1.0",
-            Description = "OAuth 2.1 + OpenID Connect Authorization Server"
-        });
-
-        c.AddSecurityDefinition("Bearer", new()
-        {
-            Name        = "Authorization",
-            Type        = Microsoft.OpenApi.Models.SecuritySchemeType.Http,
-            Scheme      = "Bearer",
-            BearerFormat = "JWT",
-            In          = Microsoft.OpenApi.Models.ParameterLocation.Header,
-            Description = "JWT Authorization header using Bearer scheme"
-        });
-
-        c.AddSecurityRequirement(new()
-        {
-            {
-                new() { Reference = new() { Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme, Id = "Bearer" } },
-                Array.Empty<string>()
-            }
-        });
+        Title       = "SpiceAuth API",
+        Version     = "v1.0",
+        Description = "OAuth 2.1 / OIDC Authorization Server — SpiceAuth"
     });
-}
+
+    c.AddSecurityDefinition("Bearer", new()
+    {
+        Name         = "Authorization",
+        Type         = Microsoft.OpenApi.Models.SecuritySchemeType.Http,
+        Scheme       = "Bearer",
+        BearerFormat = "JWT",
+        In           = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Description  = "Enter a valid JWT access token issued by this server"
+    });
+
+    c.AddSecurityRequirement(new()
+    {
+        {
+            new() { Reference = new() { Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme, Id = "Bearer" } },
+            Array.Empty<string>()
+        }
+    });
+
+    // Include XML documentation comments
+    var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    if (File.Exists(xmlPath))
+        c.IncludeXmlComments(xmlPath, includeControllerXmlComments: true);
+
+    // Tag grouping — visible in Swagger UI sidebar
+    c.TagActionsBy(api => [api.GroupName ?? api.ActionDescriptor.RouteValues["controller"] ?? "Other"]);
+    c.DocInclusionPredicate((_, _) => true);
+});
 
 var app = builder.Build();
+
+// ════════════════════════════════════════════════════════════════
+// 2K — STARTUP VALIDATION
+// ════════════════════════════════════════════════════════════════
+
+var issuerConfig = builder.Configuration["Jwt:Issuer"];
+if (string.IsNullOrWhiteSpace(issuerConfig))
+{
+    Log.Warning("⚠️  Jwt:Issuer is not configured — OIDC discovery document will use the incoming request host. Set this in production.");
+}
+else
+{
+    Log.Information("📍 OIDC Issuer: {Issuer}", issuerConfig);
+}
+
+var discordClientId = builder.Configuration["Discord:ClientId"];
+if (string.IsNullOrWhiteSpace(discordClientId))
+    Log.Warning("⚠️  Discord:ClientId not configured — external Discord login will fail");
+
+var clockSkew = TimeSpan.Zero;
+if (Math.Abs((DateTimeOffset.UtcNow - DateTimeOffset.Now).TotalSeconds) > 30)
+    Log.Warning("⚠️  System clock may be drifting — ensure NTP sync is active (detected drift > 30s)");
+
+Log.Information("📋 Config summary: DB={DbType}, Issuer={Issuer}, RateLimit=InMemory",
+    string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString("PostgreSQL")) ? "SQLite" : "PostgreSQL",
+    issuerConfig ?? "(request-derived)");
 
 // ════════════════════════════════════════════════════════════════
 // 🔐 DATABASE INITIALIZATION + SEEDING
@@ -401,7 +484,7 @@ if (app.Environment.IsDevelopment())
         await SeedSpiceApiWebClientAsync(context);
 
         var keyService = scope.ServiceProvider.GetRequiredService<IKeyManagementService>();
-        await keyService.GetActiveKeyAsync();
+        await keyService.EnsureBootstrapKeyAsync();
         Log.Information("✅ Signing key initialized");
     }
     catch (Exception ex)
@@ -410,10 +493,69 @@ if (app.Environment.IsDevelopment())
         throw;
     }
 }
+else
+{
+    // ── Production startup validation ─────────────────────────────────────────
+    // Verify DB connectivity and signing key existence before accepting traffic.
+    using var prodScope = app.Services.CreateScope();
+    var prodContext     = prodScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+    var prodKeyService  = prodScope.ServiceProvider.GetRequiredService<IKeyManagementService>();
+
+    try
+    {
+        // 1. Database connectivity
+        var canConnect = await prodContext.Database.CanConnectAsync();
+        if (!canConnect)
+            throw new InvalidOperationException("Cannot connect to production database");
+        Log.Information("✅ Database connection verified");
+
+        // 2. Pending EF migrations check (warn but don't block — ops may run migrations separately)
+        var pending = await prodContext.Database.GetPendingMigrationsAsync();
+        var pendingList = pending.ToList();
+        if (pendingList.Count > 0)
+            Log.Warning("⚠️  {Count} pending database migrations: {Migrations}",
+                pendingList.Count, string.Join(", ", pendingList));
+
+        // 3. Signing key existence (fatal if none — server cannot issue tokens)
+        await prodKeyService.EnsureBootstrapKeyAsync();
+        var primaryKey = await prodKeyService.GetPrimaryKeyAsync();
+        var expiresIn  = primaryKey.ExpiresAt - DateTime.UtcNow;
+        Log.Information("✅ Primary signing key: {Kid}, expires in {Days:F1} days",
+            primaryKey.KeyId, expiresIn.TotalDays);
+
+        if (expiresIn < TimeSpan.FromDays(14))
+            Log.Warning("⚠️  Signing key expires in {Days:F1} days — rotation due soon", expiresIn.TotalDays);
+
+        // 4. FamilyId integrity — auto-heal legacy NULL rows before traffic arrives
+        // Uses raw SQL because the EF entity uses Guid? and EF won't generate IS NULL queries
+        // against a non-nullable column after the NOT NULL migration has run.
+        try
+        {
+            var healed = await prodContext.Database.ExecuteSqlRawAsync(
+                "UPDATE refresh_tokens SET \"FamilyId\" = gen_random_uuid() WHERE \"FamilyId\" IS NULL");
+            if (healed > 0)
+                Log.Warning("⚠️  Auto-healed {Count} refresh_token rows with NULL FamilyId", healed);
+            else
+                Log.Information("✅ FamilyId integrity: no NULL rows found");
+        }
+        catch (Exception healEx)
+        {
+            // Non-fatal — may fail on SQLite (dev) or if column is already NOT NULL
+            Log.Warning(healEx, "FamilyId auto-heal skipped (expected on SQLite or after migration)");
+        }
+    }
+    catch (Exception ex)
+    {
+        Log.Fatal(ex, "💥 Production startup validation failed — aborting");
+        throw;
+    }
+}
 
 // ════════════════════════════════════════════════════════════════
 // 🔒 SECURITY MIDDLEWARE PIPELINE
 // ════════════════════════════════════════════════════════════════
+
+app.UseMiddleware<CorrelationIdMiddleware>();
 
 app.UseSerilogRequestLogging(options =>
 {
@@ -421,6 +563,8 @@ app.UseSerilogRequestLogging(options =>
     {
         diagnosticContext.Set("ClientIP", httpContext.Connection.RemoteIpAddress);
         diagnosticContext.Set("UserAgent", httpContext.Request.Headers["User-Agent"].ToString());
+        if (httpContext.Items.TryGetValue("CorrelationId", out var cid))
+            diagnosticContext.Set("CorrelationId", cid);
     };
 });
 
@@ -450,13 +594,19 @@ if (!app.Environment.IsDevelopment())
 
 app.UseIpRateLimiting();
 
-if (app.Environment.IsDevelopment())
+// Swagger: enabled in Development; in Production only when SwaggerEnabled=true
+var swaggerEnabled = app.Environment.IsDevelopment() ||
+    builder.Configuration.GetValue<bool>("Swagger:Enabled");
+
+if (swaggerEnabled)
 {
     app.UseSwagger();
     app.UseSwaggerUI(c =>
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "SpiceAuth API v1");
         c.RoutePrefix = "swagger";
+        c.DisplayRequestDuration();
+        c.DefaultModelsExpandDepth(-1);  // collapse schema section by default
     });
 }
 
@@ -466,6 +616,10 @@ app.UseAuthorization();
 
 app.MapHealthChecks("/health");
 app.MapControllers();
+
+// Prometheus scrape endpoint — allow only from loopback/internal CIDR in production
+// Configure nginx/load-balancer to restrict /metrics to your monitoring network
+app.MapMetrics("/metrics");
 
 Log.Information("✅ SpiceAuth API started successfully!");
 Log.Information("📍 Database: {DbType}", usePostgres ? "PostgreSQL" : "SQLite");

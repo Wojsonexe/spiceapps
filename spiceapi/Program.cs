@@ -90,6 +90,15 @@ builder.Services.AddScoped<Crypto>();
 builder.Services.AddScoped<SignatureCrypto>();
 builder.Services.AddScoped<Token>();
 builder.Services.AddScoped<NotificationHelper>();
+
+// named HttpClient for SpiceAuth internal calls
+builder.Services.AddHttpClient("spiceauth", client =>
+{
+    client.BaseAddress = new Uri(
+        builder.Configuration["SpiceAuth:BaseUrl"] ?? "http://localhost:5045");
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
+builder.Services.AddMemoryCache();
 //builder.Services.AddScoped<FileContext>();
 
 // Load additional configuration from appsettings.Secret.json (if any)

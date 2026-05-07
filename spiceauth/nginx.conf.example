@@ -1,0 +1,61 @@
+# SpiceAuth nginx reverse-proxy configuration example.
+# Replace <UPSTREAM> with your container/service address.
+# This config assumes SSL termination at nginx and plain HTTP upstream.
+
+upstream spiceauth {
+    server 127.0.0.1:8080;   # Docker: service name + port
+    keepalive 32;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name auth.example.com;
+
+    ssl_certificate     /etc/ssl/certs/auth.example.com.crt;
+    ssl_certificate_key /etc/ssl/private/auth.example.com.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_stapling        on;
+    ssl_stapling_verify on;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+    # Block /metrics from public access — allow only internal monitoring network
+    location /metrics {
+        allow 10.0.0.0/8;    # adjust to your Prometheus network
+        allow 172.16.0.0/12;
+        deny  all;
+        proxy_pass http://spiceauth;
+    }
+
+    # Block /swagger in production unless explicitly enabled
+    location /swagger {
+        return 404;
+        # To enable: comment out the line above and uncomment the proxy_pass
+        # proxy_pass http://spiceauth;
+    }
+
+    location / {
+        proxy_pass         http://spiceauth;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection        "";
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   X-Forwarded-Host  $host;
+        proxy_buffering    off;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+        client_max_body_size 1m;
+    }
+}
+
+server {
+    listen 80;
+    server_name auth.example.com;
+    return 301 https://$host$request_uri;
+}

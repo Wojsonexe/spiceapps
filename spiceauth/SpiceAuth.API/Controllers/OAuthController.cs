@@ -1,13 +1,17 @@
+using System.Diagnostics;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
-using System.Collections.Concurrent;
 using System.Security.Claims;
 using System.Text.Json;
 using System.Web;
+using SpiceAuth.API.Metrics;
 using SpiceAuth.Application.DTOs.OAuth;
+using SpiceAuth.Application.Exceptions;
 using SpiceAuth.Application.Services.Audit;
+using SpiceAuth.Application.Services.Federation;
 using SpiceAuth.Application.Services.OAuth;
+using SpiceAuth.Application.Services.RateLimit;
 using SpiceAuth.Core.Entities.Identity;
 using SpiceAuth.Core.Entities.OAuth;
 using SpiceAuth.Core.Entities.Security;
@@ -15,38 +19,42 @@ using SpiceAuth.Core.Enums;
 
 namespace SpiceAuth.API.Controllers;
 
+/// <summary>OAuth 2.1 / OIDC endpoints: authorization, token exchange, revocation, introspection, logout.</summary>
 [ApiController]
 [Route("/api/[controller]")]
 [Authorize(AuthenticationSchemes = "Identity.Application")]
 public sealed class OAuthController : ControllerBase
 {
     private readonly IOAuthService _oauthService;
+    private readonly IFederationService _federation;
+    private readonly IRateLimitService _rateLimiter;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly SignInManager<ApplicationUser> _signInManager;
     private readonly IAuditService _auditService;
     private readonly ILogger<OAuthController> _logger;
     private readonly IConfiguration _configuration;
-
-    private static readonly ConcurrentDictionary<string, (int Attempts, DateTime LockUntil)>
-        FailedClientAuth = new();
-
-    private static readonly ConcurrentDictionary<string, (int Attempts, DateTime LockUntil)>
-        FailedLoginAttempts = new();
+    private readonly SpiceAuthMetrics _metrics;
 
     public OAuthController(
         IOAuthService oauthService,
+        IFederationService federation,
+        IRateLimitService rateLimiter,
         UserManager<ApplicationUser> userManager,
         SignInManager<ApplicationUser> signInManager,
         IAuditService auditService,
         ILogger<OAuthController> logger,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        SpiceAuthMetrics metrics)
     {
         _oauthService  = oauthService;
+        _federation    = federation;
+        _rateLimiter   = rateLimiter;
         _userManager   = userManager;
         _signInManager = signInManager;
         _auditService  = auditService;
         _logger        = logger;
         _configuration = configuration;
+        _metrics       = metrics;
     }
 
     private string Ip() => HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
@@ -86,8 +94,7 @@ public sealed class OAuthController : ControllerBase
 
         var clientIp = Ip();
 
-        if (FailedLoginAttempts.TryGetValue(clientIp, out var lockInfo) &&
-            lockInfo.LockUntil > DateTime.UtcNow)
+        if (_rateLimiter.IsBlocked("login", clientIp))
         {
             _logger.LogWarning("Login rate limit exceeded for IP: {IP}", clientIp);
 
@@ -111,10 +118,7 @@ public sealed class OAuthController : ControllerBase
 
         if (user == null || !await _userManager.CheckPasswordAsync(user, model.Password))
         {
-            FailedLoginAttempts.AddOrUpdate(clientIp,
-                (1, DateTime.UtcNow),
-                (_, old) => (old.Attempts + 1,
-                    old.Attempts >= 4 ? DateTime.UtcNow.AddMinutes(15) : old.LockUntil));
+            _rateLimiter.RecordFailure("login", clientIp);
 
             await _auditService.LogAsync(
                 action: AuditAction.LoginFailed,
@@ -146,7 +150,7 @@ public sealed class OAuthController : ControllerBase
                 "Konto jest nieaktywne. Skontaktuj się z administratorem."), "text/html");
         }
 
-        FailedLoginAttempts.TryRemove(clientIp, out _);
+        _rateLimiter.ClearFailures("login", clientIp);
 
         await _signInManager.SignInAsync(user, model.RememberMe);
 
@@ -192,7 +196,7 @@ public sealed class OAuthController : ControllerBase
             var returnUrl = Request.Path + Request.QueryString;
             return Redirect($"/api/oauth/account/login?returnUrl={Uri.EscapeDataString(returnUrl)}");
         }
-        
+
         try
         {
             var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
@@ -205,6 +209,24 @@ public sealed class OAuthController : ControllerBase
             }
 
             var userId = Guid.Parse(userIdClaim);
+
+            // ── GlobalSession validation ──────────────────────────────────────
+            // If the user carries a `sid` claim from their browser session, verify
+            // the GlobalSession is still active. If it has been revoked (e.g. by
+            // another app calling POST /api/oauth/logout), force re-authentication.
+            var sid = User.FindFirstValue("sid");
+            if (!string.IsNullOrEmpty(sid))
+            {
+                var globalSession = await _federation.GetActiveGlobalSessionAsync(sid);
+                if (globalSession == null)
+                {
+                    _logger.LogWarning(
+                        "GlobalSession revoked or expired for user {UserId} — forcing re-authentication", userId);
+                    await _signInManager.SignOutAsync();
+                    var returnUrl = Request.Path + Request.QueryString;
+                    return Redirect($"/api/oauth/account/login?returnUrl={Uri.EscapeDataString(returnUrl)}");
+                }
+            }
 
             if (string.IsNullOrWhiteSpace(responseType) || responseType != "code")
                 return BadRequest(new { error = "unsupported_response_type", error_description = "Only 'code' response_type is supported" });
@@ -253,8 +275,15 @@ public sealed class OAuthController : ControllerBase
                 return RedirectToError(redirectUri, "invalid_request", "nonce is required when using openid scope", state);
             }
 
-            if (client.RequireConsent)
-                return ShowConsentScreen(client, redirectUri, scope, state, codeChallenge, codeChallengeMethod, nonce);
+            // ── Consent check ─────────────────────────────────────────────────
+            // First-party clients always bypass consent (they are owned by this service).
+            // Third-party clients check consent version + granted scopes; show screen if stale.
+            if (client.RequireConsent && !client.FirstParty)
+            {
+                var alreadyConsented = await _oauthService.HasUserConsentedAsync(userId, client.Id, scope);
+                if (!alreadyConsented)
+                    return ShowConsentScreen(client, redirectUri, scope, state, codeChallenge, codeChallengeMethod, nonce);
+            }
 
             var authCode = await _oauthService.CreateAuthorizationCodeAsync(
                 userId, client.Id, redirectUri, scope, codeChallenge, codeChallengeMethod, nonce);
@@ -360,10 +389,18 @@ public sealed class OAuthController : ControllerBase
 
     #region TOKEN ENDPOINT (RFC 6749 § 3.2)
 
+    /// <summary>Exchange authorization code or refresh token for access/ID tokens.</summary>
+    /// <remarks>
+    /// Supports grant types: <c>authorization_code</c>, <c>refresh_token</c>, <c>client_credentials</c>.
+    /// Confidential clients must authenticate via <c>client_secret</c> (legacy BCrypt hash or versioned <c>spc_</c> format).
+    /// </remarks>
     [HttpPost("token")]
     [AllowAnonymous]
     [Consumes("application/x-www-form-urlencoded")]
     [Produces("application/json")]
+    [ProducesResponseType(typeof(TokenResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status429TooManyRequests)]
     public async Task<ActionResult<TokenResponse>> Token(
         [FromForm(Name = "grant_type")]    string  grantType,
         [FromForm(Name = "code")]          string? code         = null,
@@ -373,13 +410,13 @@ public sealed class OAuthController : ControllerBase
         [FromForm(Name = "code_verifier")] string? codeVerifier = null,
         [FromForm(Name = "redirect_uri")]  string? redirectUri  = null)
     {
+        var sw = Stopwatch.StartNew();
         try
         {
             if (string.IsNullOrWhiteSpace(clientId))
                 return BadRequest(new { error = "invalid_request", error_description = "client_id is required" });
 
-            if (FailedClientAuth.TryGetValue(clientId, out var lockInfo) &&
-                lockInfo.LockUntil > DateTime.UtcNow)
+            if (_rateLimiter.IsBlocked("client_auth", clientId))
             {
                 _logger.LogWarning("Client authentication rate limit exceeded: {ClientId}", clientId);
                 return StatusCode(429, new { error = "too_many_requests", error_description = "Too many failed authentication attempts. Please try again later." });
@@ -394,15 +431,14 @@ public sealed class OAuthController : ControllerBase
 
             if (client.ClientType == ClientType.Confidential)
             {
-                if (string.IsNullOrEmpty(clientSecret))
-                    return BadRequest(new { error = "invalid_client", error_description = "client_secret is required for confidential clients" });
-
-                if (!BCrypt.Net.BCrypt.Verify(clientSecret, client.ClientSecretHash))
+                try
                 {
-                    FailedClientAuth.AddOrUpdate(clientId,
-                        (1, DateTime.UtcNow),
-                        (_, old) => (old.Attempts + 1,
-                            old.Attempts >= 4 ? DateTime.UtcNow.AddMinutes(15) : old.LockUntil));
+                    await _oauthService.ValidateClientCredentialsAsync(clientId, clientSecret);
+                    _rateLimiter.ClearFailures("client_auth", clientId);
+                }
+                catch (OAuthException)
+                {
+                    _rateLimiter.RecordFailure("client_auth", clientId);
 
                     await _auditService.LogAsync(
                         action: AuditAction.LoginFailed,
@@ -417,8 +453,6 @@ public sealed class OAuthController : ControllerBase
                     _logger.LogWarning("Failed client authentication: {ClientId}", clientId);
                     return BadRequest(new { error = "invalid_client" });
                 }
-
-                FailedClientAuth.TryRemove(clientId, out _);
             }
 
             if (grantType == "authorization_code")
@@ -440,6 +474,8 @@ public sealed class OAuthController : ControllerBase
                     userAgent: Ua());
 
                 _logger.LogInformation("Tokens issued via authorization_code for ClientId={ClientId}", clientId);
+                _metrics.TokensIssued.WithLabels("authorization_code", clientId ?? "").Inc();
+                _metrics.TokenEndpointDuration.WithLabels("authorization_code", "200").Observe(sw.ElapsedMilliseconds);
                 return Ok(tokens);
             }
 
@@ -456,25 +492,132 @@ public sealed class OAuthController : ControllerBase
                     resourceType: "OAuth",
                     resourceId: clientId,
                     resourceName: client.Name,
-                    metadata: """{"grant_type":"refresh_token"}""",       // ← poprawka
+                    metadata: """{"grant_type":"refresh_token"}""",
                     ipAddress: Ip(),
                     userAgent: Ua());
 
                 _logger.LogInformation("Tokens refreshed for ClientId={ClientId}", clientId);
+                _metrics.TokensIssued.WithLabels("refresh_token", clientId ?? "").Inc();
+                _metrics.TokenEndpointDuration.WithLabels("refresh_token", "200").Observe(sw.ElapsedMilliseconds);
                 return Ok(tokens);
             }
 
             return BadRequest(new { error = "unsupported_grant_type", error_description = $"Grant type '{grantType}' is not supported" });
         }
+        catch (RefreshTokenReuseDetectedException ex)
+        {
+            _logger.LogWarning("Refresh token reuse attack on client {ClientId}, user {UserId}", clientId, ex.UserId);
+            _metrics.RefreshTokenReuseAttacks.Inc();
+            _metrics.TokenEndpointFailures.WithLabels("reuse_attack", "refresh_token").Inc();
+            return BadRequest(new { error = "invalid_grant", error_description = "Token reuse detected. All sessions have been revoked." });
+        }
+        catch (AuthorizationCodeReplayException ex)
+        {
+            _logger.LogWarning("Authorization code replay attempt on client {ClientId} (code prefix: {Prefix})", clientId, ex.CodePrefix);
+            _metrics.AuthCodeReplays.Inc();
+            _metrics.TokenEndpointFailures.WithLabels("replay", "authorization_code").Inc();
+            return BadRequest(new { error = "invalid_grant", error_description = "Authorization code already used or invalid." });
+        }
+        catch (PkceException ex)
+        {
+            _logger.LogWarning("PKCE validation failed on client {ClientId}: {Reason}", clientId, ex.Reason);
+            _metrics.PkceFailures.Inc();
+            _metrics.TokenEndpointFailures.WithLabels("pkce_failed", grantType).Inc();
+            return BadRequest(new { error = "invalid_grant", error_description = "PKCE verification failed." });
+        }
+        catch (OAuthException ex)
+        {
+            _logger.LogWarning("OAuth error on token endpoint: {Error} — {Desc}", ex.Error, ex.ErrorDescription);
+            _metrics.TokenEndpointFailures.WithLabels(ex.Error, grantType).Inc();
+            return BadRequest(new { error = ex.Error, error_description = ex.ErrorDescription });
+        }
         catch (InvalidOperationException ex)
         {
             _logger.LogWarning(ex, "Token exchange failed");
+            _metrics.TokenEndpointFailures.WithLabels("invalid_grant", grantType).Inc();
             return BadRequest(new { error = "invalid_grant", error_description = ex.Message });
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Token endpoint error");
             return StatusCode(500, new { error = "server_error", error_description = "An internal error occurred" });
+        }
+    }
+
+    #endregion
+
+    #region GLOBAL LOGOUT (OIDC Back-Channel Federation)
+
+    /// <summary>
+    /// POST /api/oauth/logout
+    ///
+    /// Server-to-server endpoint. Called by a registered app when a user initiates
+    /// local logout so that SpiceAuth can propagate the revocation to all other apps
+    /// that share the same global session.
+    ///
+    /// Body (JSON): { sid, client_id, client_secret }
+    ///
+    /// Returns 200 idempotently (already-revoked sessions are handled gracefully).
+    /// </summary>
+    [HttpPost("logout")]
+    [AllowAnonymous]
+    [Consumes("application/json")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> GlobalLogout([FromBody] GlobalLogoutRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Sid))
+            return BadRequest(new { error = "invalid_request", error_description = "sid is required" });
+
+        if (string.IsNullOrWhiteSpace(request.ClientId))
+            return BadRequest(new { error = "invalid_request", error_description = "client_id is required" });
+
+        if (_rateLimiter.IsBlocked("client_auth", request.ClientId))
+        {
+            _logger.LogWarning("Logout rate limit exceeded for client: {ClientId}", request.ClientId);
+            return StatusCode(429, new { error = "too_many_requests" });
+        }
+
+        try
+        {
+            await _oauthService.ValidateClientCredentialsAsync(request.ClientId, request.ClientSecret);
+        }
+        catch
+        {
+            _rateLimiter.RecordFailure("client_auth", request.ClientId);
+            _logger.LogWarning("Logout: invalid client credentials for {ClientId}", request.ClientId);
+            return Unauthorized(new { error = "invalid_client" });
+        }
+
+        _rateLimiter.ClearFailures("client_auth", request.ClientId);
+
+        try
+        {
+            // Revoke the GlobalSession and dispatch logout_tokens to all registered apps.
+            // Fire-and-forget is intentional: caller should not wait on network I/O to all apps.
+            _ = Task.Run(() => _federation.RevokeAndDispatchAsync(
+                request.Sid, request.ClientId, request.ClientSecret ?? string.Empty));
+
+            await _auditService.LogAsync(
+                action: AuditAction.Logout,
+                actorEmail: request.ClientId,
+                resourceType: "OAuth",
+                resourceId: request.ClientId,
+                metadata: $"{{\"sid\":\"{request.Sid[..Math.Min(8, request.Sid.Length)]}…\"}}",
+                ipAddress: Ip(),
+                userAgent: Ua());
+
+            _logger.LogInformation(
+                "Global logout initiated by client {ClientId} for sid=…{Tail}",
+                request.ClientId, request.Sid[^Math.Min(6, request.Sid.Length)..]);
+
+            return Ok(new { ok = true });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Global logout error for client {ClientId}", request.ClientId);
+            return StatusCode(500, new { error = "server_error" });
         }
     }
 
@@ -504,7 +647,24 @@ public sealed class OAuthController : ControllerBase
         try
         {
             var userInfo = await _oauthService.GetUserInfoAsync(userId);
-            return Ok(userInfo);
+
+            // Attach sid from the user's most-recent active GlobalSession.
+            // If no active session exists the user has globally logged out — honour it.
+            var sessions = await _federation.GetUserSessionsAsync(userId);
+            var activeSid = sessions.FirstOrDefault(s => s.IsActive)?.Sid;
+
+            if (activeSid == null)
+            {
+                _logger.LogWarning("UserInfo: no active GlobalSession for user {UserId} — rejecting", userId);
+                return Unauthorized(new { error = "invalid_token", error_description = "Session expired or revoked" });
+            }
+
+            // Merge sid into the response (anonymous type cannot be patched — project to dict)
+            var raw = System.Text.Json.JsonSerializer.SerializeToElement(userInfo);
+            var dict = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(raw.GetRawText())!;
+            dict["sid"] = activeSid;
+
+            return Ok(dict);
         }
         catch (Exception ex)
         {
@@ -618,25 +778,6 @@ public sealed class OAuthController : ControllerBase
         return Redirect($"{frontendUrl}/consent?{query}");
     }
 
-    public static (int ClientsRemoved, int LoginsRemoved) CleanupExpiredLocks()
-    {
-        var now = DateTime.UtcNow;
-
-        var expiredClients = FailedClientAuth
-            .Where(x => x.Value.LockUntil < now.AddHours(-1))
-            .Select(x => x.Key).ToList();
-        foreach (var key in expiredClients)
-            FailedClientAuth.TryRemove(key, out _);
-
-        var expiredLogins = FailedLoginAttempts
-            .Where(x => x.Value.LockUntil < now.AddHours(-1))
-            .Select(x => x.Key).ToList();
-        foreach (var key in expiredLogins)
-            FailedLoginAttempts.TryRemove(key, out _);
-
-        return (expiredClients.Count, expiredLogins.Count);
-    }
-
     #endregion
 }
 
@@ -645,4 +786,11 @@ public record LoginModel
     public string Email      { get; set; } = string.Empty;
     public string Password   { get; set; } = string.Empty;
     public bool   RememberMe { get; set; } = false;
+}
+
+public record GlobalLogoutRequest
+{
+    public string  Sid          { get; init; } = string.Empty;
+    public string  ClientId     { get; init; } = string.Empty;
+    public string? ClientSecret { get; init; }
 }

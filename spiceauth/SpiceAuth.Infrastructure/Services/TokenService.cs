@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -148,6 +149,47 @@ public class TokenService(
 
         _logger.LogDebug("Generated ID token for user {UserId}, client {ClientId}", userId, clientId);
         return token;
+    }
+
+    // ─── Back-Channel Logout Token (OIDC § 9) ────────────────────────────────
+
+    /// <summary>
+    /// Produces an OIDC logout+jwt signed with the active RSA key.
+    /// Lifetime: 2 minutes — short enough that replay risk is negligible even before jti store cleanup.
+    /// The `audience` parameter should be the client_id of the receiving app.
+    /// </summary>
+    public async Task<string> GenerateLogoutTokenAsync(string sid, string audience)
+    {
+        var (credentials, kid) = await BuildSigningCredentialsAsync();
+        var now = DateTime.UtcNow;
+
+        var eventsJson = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["http://schemas.openid.net/event/backchannel-logout"] = new { }
+        });
+
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new(JwtRegisteredClaimNames.Iat,
+                new DateTimeOffset(now).ToUnixTimeSeconds().ToString(),
+                ClaimValueTypes.Integer64),
+            new("sid", sid),
+            new("events", eventsJson, JsonClaimValueTypes.Json),
+        };
+
+        var descriptor = new SecurityTokenDescriptor
+        {
+            Subject            = new ClaimsIdentity(claims),
+            Issuer             = Issuer,
+            Audience           = audience,
+            NotBefore          = now,
+            Expires            = now.AddMinutes(2),
+            SigningCredentials = credentials
+        };
+
+        _logger.LogDebug("Generated logout_token for sid={Sid}", sid[..Math.Min(8, sid.Length)]);
+        return WriteToken(descriptor, kid, tokenType: "logout+jwt");
     }
 
     // ─── Refresh Token ────────────────────────────────────────────────────────
@@ -385,7 +427,7 @@ public class TokenService(
     /// </summary>
     public async Task<SigningKey> GetActiveSigningKeyAsync()
     {
-        return await _keyManagement.GetActiveKeyAsync();
+        return await _keyManagement.GetPrimaryKeyAsync();
     }
 
     // ─── Key Rotation ─────────────────────────────────────────────────────────
@@ -440,7 +482,7 @@ public class TokenService(
 
     private async Task<(SigningCredentials Credentials, string Kid)> BuildSigningCredentialsAsync()
     {
-        var key = await _keyManagement.GetActiveKeyAsync();
+        var key = await _keyManagement.GetPrimaryKeyAsync();
 
         using var rsa = RSA.Create();
         rsa.ImportRSAPrivateKey(Convert.FromBase64String(key.PrivateKey), out _);

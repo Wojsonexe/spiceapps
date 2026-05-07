@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
 using System.Web;
 using SpiceAuth.Application.Services.Audit;
+using SpiceAuth.Application.Services.Federation;
 using SpiceAuth.Core.Entities.Identity;
 using SpiceAuth.Core.Entities.Security;
 
@@ -14,6 +16,7 @@ namespace SpiceAuth.API.Controllers;
 public class AccountController(
     SignInManager<ApplicationUser> signInManager,
     UserManager<ApplicationUser> userManager,
+    IFederationService federation,
     IAuditService auditService,
     ILogger<AccountController> logger) : Controller
 {
@@ -81,9 +84,10 @@ public class AccountController(
             return Content(RenderLoginPage(returnUrl, "Konto jest nieaktywne. Skontaktuj się z administratorem."), "text/html");
         }
 
-        var result = await signInManager.PasswordSignInAsync(user, password, rememberMe, lockoutOnFailure: true);
+        // CheckPasswordSignInAsync validates credentials + handles lockout without committing a cookie.
+        var checkResult = await signInManager.CheckPasswordSignInAsync(user, password, lockoutOnFailure: true);
 
-        if (result.IsLockedOut)
+        if (checkResult.IsLockedOut)
         {
             await auditService.LogAsync(
                 action: AuditAction.LoginFailed,
@@ -99,18 +103,28 @@ public class AccountController(
             return Content(RenderLoginPage(returnUrl, "Konto zablokowane. Zbyt wiele prób logowania."), "text/html");
         }
 
-        if (!result.Succeeded)
+        if (!checkResult.Succeeded)
             return Content(RenderLoginPage(returnUrl, "Nieprawidłowy email lub hasło."), "text/html");
+
+        // Create a GlobalSession — this is the federation anchor for this browser session.
+        var globalSession = await federation.CreateGlobalSessionAsync(
+            user.Id, Ip(), Ua());
+
+        // Sign in with the sid claim embedded so every downstream request can resolve the GlobalSession.
+        var authProps = new AuthenticationProperties { IsPersistent = rememberMe };
+        var extraClaims = new[] { new Claim("sid", globalSession.Sid) };
+        await signInManager.SignInWithClaimsAsync(user, authProps, extraClaims);
 
         await auditService.LogAsync(
             action: AuditAction.Login,
             actorEmail: email,
             actorId: user.Id,
             resourceType: "Auth",
+            metadata: $"{{\"sid\":\"{globalSession.Sid[..Math.Min(8, globalSession.Sid.Length)]}…\"}}",
             ipAddress: Ip(),
             userAgent: Ua());
 
-        logger.LogInformation("User {Email} logged in from {IP}", email, Ip());
+        logger.LogInformation("User {Email} logged in from {IP} (GlobalSession created)", email, Ip());
 
         var redirectUrl = !string.IsNullOrEmpty(returnUrl) && Url.IsLocalUrl(returnUrl)
             ? returnUrl
@@ -123,8 +137,26 @@ public class AccountController(
     [Authorize]
     public async Task<IActionResult> Logout()
     {
-        var email = User.FindFirstValue(ClaimTypes.Email) ?? "unknown";
+        var email  = User.FindFirstValue(ClaimTypes.Email) ?? "unknown";
         var userId = Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : (Guid?)null;
+        var sid    = User.FindFirstValue("sid");
+
+        // Revoke the GlobalSession first (marks revokedAt in DB so any concurrent
+        // authorize request for the same session is forced to re-authenticate).
+        if (!string.IsNullOrEmpty(sid))
+        {
+            await federation.RevokeGlobalSessionAsync(sid);
+
+            // Dispatch backchannel logout tokens to all registered apps.
+            // Fire-and-forget: network I/O to external apps must not block the user's redirect.
+            _ = Task.Run(() =>
+                federation.RevokeAndDispatchAsync(sid, clientId: string.Empty, clientSecret: string.Empty)
+                    .ContinueWith(t =>
+                    {
+                        if (t.Exception != null)
+                            logger.LogError(t.Exception, "Backchannel dispatch error on logout");
+                    }, TaskScheduler.Default));
+        }
 
         await signInManager.SignOutAsync();
 

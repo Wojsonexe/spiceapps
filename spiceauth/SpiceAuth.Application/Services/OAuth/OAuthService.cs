@@ -1,14 +1,13 @@
-
-
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.IdentityModel.Tokens;
 using SpiceAuth.Application.DTOs.OAuth;
 using SpiceAuth.Application.Exceptions;
+using SpiceAuth.Application.Services.Federation;
 using SpiceAuth.Application.Services.Identity;
+using SpiceAuth.Application.Services.Security;
 using SpiceAuth.Application.Services.Token;
 using SpiceAuth.Core.Entities.Identity;
 using SpiceAuth.Core.Entities.OAuth;
@@ -17,19 +16,27 @@ using TokenRequest = SpiceAuth.Application.Services.Token.TokenRequest;
 
 namespace SpiceAuth.Application.Services.OAuth;
 
-public  class OAuthService(
+public class OAuthService(
     DbContext context,
     IIdentityStore identity,
     ITokenService tokenService,
     ILogger<OAuthService> logger,
-    UserManager<ApplicationUser> userManager) : IOAuthService
+    UserManager<ApplicationUser> userManager,
+    IFederationService federation,
+    ISecurityEventService securityEvents,
+    IPkceService pkce,
+    IUriSanitizer uriSanitizer) : IOAuthService
 {
     private readonly DbContext _context = context;
     private readonly IIdentityStore _identity = identity;
     private readonly ITokenService _tokenService = tokenService;
     private readonly ILogger<OAuthService> _logger = logger;
     private readonly UserManager<ApplicationUser> _userManager = userManager;
-    
+    private readonly IFederationService _federation = federation;
+    private readonly ISecurityEventService _securityEvents = securityEvents;
+    private readonly IPkceService _pkce = pkce;
+    private readonly IUriSanitizer _uriSanitizer = uriSanitizer;
+
 
     public Task<TokenResponse> RefreshTokenAsync(string refreshToken, Guid clientId)
         => RefreshInternalAsync(refreshToken, clientId);
@@ -65,10 +72,10 @@ public  class OAuthService(
 
         if (client.ClientType == ClientType.Confidential)
         {
-            if (string.IsNullOrEmpty(clientSecret) || string.IsNullOrEmpty(client.ClientSecretHash))
+            if (string.IsNullOrEmpty(clientSecret))
                 throw new OAuthException("invalid_client", "Client secret required");
 
-            if (!VerifyClientSecret(clientSecret, client.ClientSecretHash))
+            if (!await VerifyClientSecretAsync(client, clientSecret))
                 throw new OAuthException("invalid_client", "Invalid client secret");
         }
     }
@@ -179,7 +186,7 @@ public  class OAuthService(
 
         if (!string.IsNullOrEmpty(authCode.CodeChallenge) && !string.IsNullOrEmpty(codeVerifier))
         {
-            if (!ValidatePkce(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod))
+            if (authCode.CodeChallengeMethod != "S256" || !_pkce.VerifyChallenge(codeVerifier, authCode.CodeChallenge))
                 return null;
         }
 
@@ -252,41 +259,92 @@ public  class OAuthService(
         string redirectUri,
         string? codeVerifier)
     {
-        var authCode = await _context.Set<AuthorizationCode>()
-            .FirstOrDefaultAsync(c => c.Code == code && !c.IsUsed);
+        var codePrefix = code.Length > 8 ? code[..8] : code;
 
-        if (authCode == null || authCode.ExpiresAt < DateTime.UtcNow)
-            throw new InvalidOperationException("Authorization code is invalid or expired");
+        // Load without IsUsed filter so we can distinguish replay from "never existed"
+        var authCode = await _context.Set<AuthorizationCode>()
+            .FirstOrDefaultAsync(c => c.Code == code);
+
+        if (authCode == null)
+            throw new AuthorizationCodeReplayException(codePrefix);
+
+        // 3B early: detect sequential replay immediately (before any expensive validation)
+        if (authCode.IsUsed)
+        {
+            await ContainAuthCodeReplayAsync(authCode, clientId, codePrefix);
+            throw new AuthorizationCodeReplayException(codePrefix);
+        }
+
+        if (authCode.ExpiresAt < DateTime.UtcNow)
+            throw new OAuthException("invalid_grant", "Authorization code expired");
 
         if (authCode.ClientId != clientId)
-            throw new InvalidOperationException("Client mismatch");
+            throw new OAuthException("invalid_grant", "Client mismatch");
 
         if (!string.IsNullOrEmpty(authCode.RedirectUri) &&
             authCode.RedirectUri != redirectUri)
-            throw new InvalidOperationException("redirect_uri mismatch");
+            throw new OAuthException("invalid_grant", "redirect_uri mismatch");
 
+        // 3A: PKCE hardening — S256 only, format validation, constant-time comparison
         if (!string.IsNullOrEmpty(authCode.CodeChallenge))
         {
+            if (authCode.CodeChallengeMethod != "S256")
+            {
+                _securityEvents.Record(authCode.UserId, SecurityEventType.PkceValidationFailed,
+                    SecurityEventSeverity.High,
+                    $"Unsupported code_challenge_method: {authCode.CodeChallengeMethod}");
+                throw new PkceException($"Only S256 code_challenge_method is supported");
+            }
+
             if (string.IsNullOrEmpty(codeVerifier))
-                throw new InvalidOperationException("code_verifier is required");
+            {
+                _securityEvents.Record(authCode.UserId, SecurityEventType.PkceValidationFailed,
+                    SecurityEventSeverity.High, "code_verifier missing for PKCE-protected code");
+                throw new PkceException("code_verifier is required");
+            }
 
-            using var sha256  = SHA256.Create();
-            var verifierBytes = Encoding.ASCII.GetBytes(codeVerifier);
-            var challengeBytes = sha256.ComputeHash(verifierBytes);
-            var computedChallenge = Base64UrlEncoder.Encode(challengeBytes);
+            try
+            {
+                _pkce.ValidateVerifierFormat(codeVerifier);
+            }
+            catch (PkceException ex)
+            {
+                _securityEvents.Record(authCode.UserId, SecurityEventType.PkceValidationFailed,
+                    SecurityEventSeverity.High, ex.Reason);
+                throw;
+            }
 
-        if (computedChallenge != authCode.CodeChallenge)
-                throw new InvalidOperationException("code_verifier does not match code_challenge");
+            if (!_pkce.VerifyChallenge(codeVerifier, authCode.CodeChallenge))
+            {
+                _securityEvents.Record(authCode.UserId, SecurityEventType.PkceValidationFailed,
+                    SecurityEventSeverity.High, "code_verifier does not match code_challenge");
+                throw new PkceException("code_verifier does not match code_challenge");
+            }
         }
 
-        authCode.IsUsed  = true;
-        authCode.UsedAt  = DateTime.UtcNow;
+        // 3B: Atomic single-use redemption via optimistic concurrency token on IsUsed.
+        // EF Core tracks the original value (false) and generates:
+        //   UPDATE authorization_codes SET IsUsed=1, UsedAt=@now WHERE Id=@id AND IsUsed=0
+        // On PostgreSQL/SQLite this is a true atomic compare-and-swap.
+        // On InMemory the concurrency token check also works (EF validates against tracked original).
+        authCode.IsUsed = true;
+        authCode.UsedAt = DateTime.UtcNow;
+        try
+        {
+            await _context.SaveChangesAsync();
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException)
+        {
+            // Concurrent replay: another request won the race and already consumed this code.
+            await ContainAuthCodeReplayAsync(authCode, clientId, codePrefix);
+            throw new AuthorizationCodeReplayException(codePrefix);
+        }
 
         var user = await _userManager.FindByIdAsync(authCode.UserId.ToString())
-            ?? throw new InvalidOperationException("User not found");
+            ?? throw new OAuthException("invalid_grant", "User not found");
 
         var userRoles = await _userManager.GetRolesAsync(user);
-        
+
         var tokenRequest = new TokenRequest
         {
             UserId   = authCode.UserId,
@@ -341,10 +399,24 @@ public  class OAuthService(
 
         if (storedToken.IsUsed)
         {
-            _logger.LogWarning("Refresh token reuse detected: {TokenId}", storedToken.Id);
-            // Revoke entire token family
-            await RevokeTokenFamilyAsync(storedToken.Id);
-            throw new InvalidOperationException("Token reuse detected - all tokens revoked");
+            _logger.LogWarning(
+                "Refresh token REUSE detected: tokenId={TokenId}, familyId={FamilyId}, userId={UserId}",
+                storedToken.Id, storedToken.FamilyId, storedToken.UserId);
+
+            // Revoke entire token family by FamilyId (not just direct parent/child)
+            await RevokeTokenFamilyAsync(storedToken.FamilyId);
+
+            // Revoke GlobalSession(s); dispatch is fire-and-forget inside RevokeAllUserSessionsAsync
+            await _federation.RevokeAllUserSessionsAsync(storedToken.UserId);
+
+            // Non-blocking security event
+            _securityEvents.Record(
+                storedToken.UserId,
+                SecurityEventType.RefreshTokenReuseAttack,
+                SecurityEventSeverity.High,
+                $"Refresh token reuse detected. Family {storedToken.FamilyId} fully revoked.");
+
+            throw new RefreshTokenReuseDetectedException(storedToken.UserId, storedToken.FamilyId);
         }
 
         if (storedToken.ExpiresAt < DateTime.UtcNow)
@@ -421,14 +493,7 @@ public  class OAuthService(
         }
 
         if (!string.IsNullOrEmpty(clientSecret))
-        {
-            if (string.IsNullOrEmpty(client.ClientSecretHash))
-            {
-                return false;
-            }
-
-            return VerifyClientSecret(clientSecret, client.ClientSecretHash);
-        }
+            return await VerifyClientSecretAsync(client, clientSecret);
 
         return true;
     }
@@ -446,52 +511,68 @@ public  class OAuthService(
 
     public async Task<bool> HasUserConsentedAsync(Guid userId, Guid clientId, string scope)
     {
+        var client = await _context.Set<OAuthClient>()
+            .FirstOrDefaultAsync(c => c.Id == clientId);
+
         var consent = await _context.Set<ConsentGrant>()
-            .FirstOrDefaultAsync(c => 
-                c.UserId == userId && 
-                c.ClientId == clientId && 
+            .FirstOrDefaultAsync(c =>
+                c.UserId == userId &&
+                c.ClientId == clientId &&
                 !c.IsRevoked);
 
         if (consent == null)
             return false;
 
-        // Check if all requested scopes are in granted scopes
-        var requestedScopes = scope.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var grantedScopes = consent.Scope.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        // Re-consent required if the client has bumped its consent version since last grant
+        if (client != null && consent.ConsentVersion < client.ConsentVersion)
+            return false;
 
-        return requestedScopes.All(s => grantedScopes.Contains(s));
+        var requestedScopes = scope.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var grantedScopes   = consent.Scope.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        if (!requestedScopes.All(s => grantedScopes.Contains(s)))
+            return false;
+
+        consent.LastUsedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        return true;
     }
 
     public async Task GrantConsentAsync(Guid userId, Guid clientId, string scope)
     {
+        var client = await _context.Set<OAuthClient>().FirstOrDefaultAsync(c => c.Id == clientId);
+        var version = client?.ConsentVersion ?? 1;
+
         var existingConsent = await _context.Set<ConsentGrant>()
             .FirstOrDefaultAsync(c => c.UserId == userId && c.ClientId == clientId);
 
         if (existingConsent != null)
         {
-            existingConsent.Scope = scope;
-            existingConsent.GrantedAt = DateTime.UtcNow;
-            existingConsent.IsRevoked = false;
+            existingConsent.Scope          = scope;
+            existingConsent.GrantedAt      = DateTime.UtcNow;
+            existingConsent.IsRevoked      = false;
+            existingConsent.ConsentVersion = version;
+            existingConsent.LastUsedAt     = DateTime.UtcNow;
         }
         else
         {
-            var consent = new ConsentGrant
+            _context.Set<ConsentGrant>().Add(new ConsentGrant
             {
-                Id = Guid.NewGuid(),
-                UserId = userId,
-                ClientId = clientId,
-                Scope = scope,
-                GrantedAt = DateTime.UtcNow,
-                IsRevoked = false,
-                CreatedAt = DateTime.UtcNow
-            };
-
-            _context.Set<ConsentGrant>().Add(consent);
+                Id             = Guid.NewGuid(),
+                UserId         = userId,
+                ClientId       = clientId,
+                Scope          = scope,
+                GrantedAt      = DateTime.UtcNow,
+                IsRevoked      = false,
+                ConsentVersion = version,
+                LastUsedAt     = DateTime.UtcNow,
+                CreatedAt      = DateTime.UtcNow
+            });
         }
 
         await _context.SaveChangesAsync();
-
-        _logger.LogInformation("User {UserId} granted consent to client {ClientId}", userId, clientId);
+        _logger.LogInformation("User {UserId} granted consent to client {ClientId} (v{Version})", userId, clientId, version);
     }
 
     public async Task RevokeConsentAsync(Guid userId, Guid clientId)
@@ -565,6 +646,21 @@ public  class OAuthService(
     public async Task<ClientRegistrationResponse> RegisterClientAsync(
         RegisterClientRequest request, Guid createdByUserId)
     {
+        // SSRF: validate all redirect and post-logout URIs before persisting
+        foreach (var uri in request.RedirectUris)
+        {
+            var result = await _uriSanitizer.ValidateAsync(uri);
+            if (!result.IsValid)
+                throw new InvalidOperationException($"Invalid redirect_uri '{uri}': {result.Error}");
+        }
+
+        foreach (var uri in request.PostLogoutRedirectUris ?? [])
+        {
+            var result = await _uriSanitizer.ValidateAsync(uri);
+            if (!result.IsValid)
+                throw new InvalidOperationException($"Invalid post_logout_redirect_uri '{uri}': {result.Error}");
+        }
+
         // Generate client credentials
         var clientId = Guid.NewGuid().ToString("N");
         var clientSecret = GenerateClientSecret();
@@ -652,21 +748,49 @@ public  class OAuthService(
         return Convert.ToBase64String(bytes);
     }
 
-    private async Task RevokeTokenFamilyAsync(Guid tokenId)
+    private async Task ContainAuthCodeReplayAsync(AuthorizationCode authCode, Guid clientId, string codePrefix)
     {
-        // Revoke all tokens in the family (parent and children)
+        _logger.LogCritical(
+            "Auth code replay ATTACK: code={CodePrefix}, userId={UserId}, clientId={ClientId}",
+            codePrefix, authCode.UserId, clientId);
+
+        var families = await _context.Set<RefreshToken>()
+            .Where(rt => rt.UserId == authCode.UserId
+                      && rt.ClientId == clientId
+                      && !rt.IsRevoked)
+            .Select(rt => rt.FamilyId)
+            .Distinct()
+            .ToListAsync();
+
+        foreach (var fid in families)
+            await RevokeTokenFamilyAsync(fid);
+
+        await _federation.RevokeAllUserSessionsAsync(authCode.UserId);
+
+        _securityEvents.Record(
+            authCode.UserId,
+            SecurityEventType.AuthorizationCodeReplay,
+            SecurityEventSeverity.Critical,
+            $"Auth code replay detected. Code={codePrefix}, Client={clientId}. " +
+            $"{families.Count} token family(ies) revoked. All global sessions terminated.");
+    }
+
+    private async Task RevokeTokenFamilyAsync(Guid? familyId)
+    {
+        if (!familyId.HasValue) return;
+
         var tokens = await _context.Set<RefreshToken>()
-            .Where(rt => rt.Id == tokenId || rt.ParentTokenId == tokenId)
+            .Where(rt => rt.FamilyId == familyId && !rt.IsRevoked)
             .ToListAsync();
 
         foreach (var token in tokens)
         {
             token.IsRevoked = true;
+            token.IsUsed    = true;
         }
 
         await _context.SaveChangesAsync();
-
-        _logger.LogWarning("Revoked token family, {Count} tokens affected", tokens.Count);
+        _logger.LogWarning("Revoked token family {FamilyId}, {Count} tokens affected", familyId, tokens.Count);
     }
 
     private static string GenerateSecureCode()
@@ -704,29 +828,60 @@ public  class OAuthService(
         }
     }
 
-
-    private static bool ValidatePkce(string codeVerifier, string codeChallenge, string? method)
+    // Verifies against versioned ClientSecrets table (spc_ prefix) with LastUsedAt update,
+    // falling back to the legacy OAuthClient.ClientSecretHash for pre-migration clients.
+    private async Task<bool> VerifyClientSecretAsync(OAuthClient client, string clientSecret)
     {
-        if (method != "S256")
+        if (clientSecret.StartsWith("spc_", StringComparison.Ordinal))
         {
-            return false;
+            var dotIdx = clientSecret.IndexOf('.', 4);
+            if (dotIdx < 0) return false;
+            var prefix = clientSecret[..dotIdx];
+
+            var now    = DateTime.UtcNow;
+            var secret = await _context.Set<ClientSecret>()
+                .Where(s => s.Prefix           == prefix
+                         && s.ClientInternalId == client.Id
+                         && s.IsActive
+                         && (s.ExpiresAt == null || s.ExpiresAt > now))
+                .FirstOrDefaultAsync();
+
+            if (secret == null) return false;
+            if (!VerifyClientSecret(clientSecret, secret.SecretHash)) return false;
+
+            await _context.Set<ClientSecret>()
+                .Where(s => s.Id == secret.Id)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.LastUsedAt, DateTime.UtcNow));
+
+            return true;
         }
 
-        using var sha256 = SHA256.Create();
-        var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(codeVerifier));
-        var computedChallenge = Convert.ToBase64String(hash)
-            .Replace("+", "-")
-            .Replace("/", "_")
-            .Replace("=", "");
-
-        return computedChallenge == codeChallenge;
+        // Legacy path: OAuthClient.ClientSecretHash
+        if (string.IsNullOrEmpty(client.ClientSecretHash)) return false;
+        return VerifyClientSecret(clientSecret, client.ClientSecretHash);
     }
-    
+
+
     public async Task<OAuthClient> UpdateClientAsync(
         Guid clientInternalId, UpdateClientRequest request, Guid updatedByUserId)
     {
         var client = await GetClientByIdAsync(clientInternalId)
             ?? throw new InvalidOperationException("Client not found");
+
+        // SSRF: validate all redirect and post-logout URIs before persisting
+        foreach (var uri in request.RedirectUris)
+        {
+            var result = await _uriSanitizer.ValidateAsync(uri);
+            if (!result.IsValid)
+                throw new InvalidOperationException($"Invalid redirect_uri '{uri}': {result.Error}");
+        }
+
+        foreach (var uri in request.PostLogoutRedirectUris ?? [])
+        {
+            var result = await _uriSanitizer.ValidateAsync(uri);
+            if (!result.IsValid)
+                throw new InvalidOperationException($"Invalid post_logout_redirect_uri '{uri}': {result.Error}");
+        }
 
         client.Name = request.Name;
         client.Description = request.Description;

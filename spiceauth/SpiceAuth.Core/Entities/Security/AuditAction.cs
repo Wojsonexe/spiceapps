@@ -30,4 +30,20 @@ public enum AuditAction
     
     ConsentGranted = 40,
     ConsentDenied = 41,
+
+    // Security incidents
+    RefreshTokenReuseAttack = 50,
+    BackchannelLogoutDispatched = 51,
+    GlobalSessionRevoked = 52,
+    PkceValidationFailed = 53,
+    AuthorizationCodeReplay = 54,
+    KeyRotated = 55,
+    KeyRevoked = 56,
+    ClientSecretRotated2 = 57,   // v2 rotation audit (multiple-secret model)
+    FederationDispatchFailed = 58,
+
+    // Client secret lifecycle (3K)
+    ClientSecretCreated = 60,
+    ClientSecretRevoked = 61,
+    ClientSecretUsed    = 62,
 }

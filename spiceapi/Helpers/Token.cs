@@ -1,54 +1,118 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.IdentityModel.Tokens;
 using Newtonsoft.Json;
 using Serilog;
 using SpiceAPI.Models;
-using System.Buffers.Text;
 using System.ComponentModel.DataAnnotations;
-using System.Security.Cryptography;
+using System.IdentityModel.Tokens.Jwt;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace SpiceAPI.Auth
 {
     public class Token
     {
-
         private readonly SignatureCrypto sc;
         private readonly DataContext db;
-        public Token(SignatureCrypto _sc, DataContext db)
+        private readonly IHttpClientFactory _http;
+        private readonly IMemoryCache _cache;
+        private readonly IConfiguration _config;
+
+        private const string JwksCacheKey = "spiceauth_jwks";
+        private static readonly TimeSpan JwksTtl = TimeSpan.FromMinutes(60);
+
+        public Token(SignatureCrypto _sc, DataContext db,
+            IHttpClientFactory http, IMemoryCache cache, IConfiguration config)
         {
             sc = _sc;
             this.db = db;
+            _http = http;
+            _cache = cache;
+            _config = config;
         }
 
-        public string GenerateToken(UserToken token)
+        // ── Format detection ──────────────────────────────────────────────────
+
+        private static bool IsJwt(string token) =>
+            token.StartsWith("ey", StringComparison.Ordinal) &&
+            token.Count(c => c == '.') == 2;
+
+        // ── JWKS fetch + cache ────────────────────────────────────────────────
+
+        private async Task<IList<SecurityKey>> GetJwksKeysAsync()
         {
-            // Serialize the UserToken to JSON
-            string tokenstr = System.Text.Json.JsonSerializer.Serialize(token, new JsonSerializerOptions() { AllowTrailingCommas = false, WriteIndented = false});
+            if (_cache.TryGetValue(JwksCacheKey, out IList<SecurityKey>? cached) && cached is not null)
+                return cached;
 
+            var client = _http.CreateClient("spiceauth");
+            var json   = await client.GetStringAsync("/.well-known/jwks.json");
+            var keys   = new JsonWebKeySet(json).GetSigningKeys();
 
-            // Base64 encode the serialized token string for transmission
-            string tokenBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(tokenstr), Base64FormattingOptions.None);
-
-            // Sign the original serialized string (not the base64)
-            string signature = Convert.ToBase64String(sc.SignData(tokenstr), Base64FormattingOptions.None);
-
-
-            // Return the token + signature in the expected format
-            return $"{tokenBase64}.{signature}";
+            _cache.Set(JwksCacheKey, keys, JwksTtl);
+            return keys;
         }
 
+        // ── JWT path ──────────────────────────────────────────────────────────
 
-        public bool VerifyToken(string b64token)
+        private bool VerifyJwt(string token)
         {
-            // Split the token into its components: the base64-encoded token and the signature
-            string[] token;
             try
             {
-                token = b64token.Split('.');
-                // Accessing token[0] and token[1] below, so check length
-                if (token.Length < 2)
+                var keys     = GetJwksKeysAsync().GetAwaiter().GetResult();
+                var issuer   = _config["SpiceAuth:Issuer"];
+                var audience = _config["SpiceAuth:Audience"];
+
+                new JwtSecurityTokenHandler().ValidateToken(token, new TokenValidationParameters
+                {
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKeys        = keys,
+                    ValidateIssuer           = !string.IsNullOrWhiteSpace(issuer),
+                    ValidIssuer              = issuer,
+                    ValidateAudience         = !string.IsNullOrWhiteSpace(audience),
+                    ValidAudience            = audience,
+                    ValidateLifetime         = true,
+                    ClockSkew                = TimeSpan.FromMinutes(5)
+                }, out _);
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger.Warning(ex, "JWT validation failed");
+                return false;
+            }
+        }
+
+        private async Task<User?> RetrieveUserFromJwt(string token)
+        {
+            try
+            {
+                var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+                var sub = jwt.Claims.FirstOrDefault(c =>
+                    c.Type == JwtRegisteredClaimNames.Sub || c.Type == "sub")?.Value;
+
+                if (string.IsNullOrWhiteSpace(sub) || !Guid.TryParse(sub, out var userId))
+                    return null;
+
+                return await db.Users.Include(u => u.Roles)
+                    .FirstOrDefaultAsync(u => u.Id == userId);
+            }
+            catch (Exception ex)
+            {
+                Log.Logger.Warning(ex, "Failed to extract user from JWT");
+                return null;
+            }
+        }
+
+        // ── Legacy RSA path ───────────────────────────────────────────────────
+
+        private bool VerifyLegacy(string b64token)
+        {
+            string[] parts;
+            try
+            {
+                parts = b64token.Split('.');
+                if (parts.Length < 2)
                     throw new IndexOutOfRangeException("Token does not contain both payload and signature.");
             }
             catch (IndexOutOfRangeException e)
@@ -57,43 +121,51 @@ namespace SpiceAPI.Auth
                 return false;
             }
 
+            string tokenstr = Encoding.UTF8.GetString(Convert.FromBase64String(parts[0]));
 
-
-            // Decode the base64 token to retrieve the original serialized token string
-            string tokenstr = Encoding.UTF8.GetString(Convert.FromBase64String(token[0]));
-
-            if (sc.VerifyData(tokenstr, token[1])) 
-            { 
-                UserToken tok = JsonConvert.DeserializeObject<UserToken>(tokenstr);
-                if (tok.Expires > DateTime.UtcNow) return true;
-                else return false;
+            if (sc.VerifyData(tokenstr, parts[1]))
+            {
+                UserToken tok = JsonConvert.DeserializeObject<UserToken>(tokenstr)!;
+                return tok.Expires > DateTime.UtcNow;
             }
 
-            // Verify the signature by comparing it to the original (non-encoded) token string
-            else return false;
+            return false;
         }
 
-
-        public async Task<User?> RetrieveUser(string b64token) 
+        private async Task<User?> RetrieveUserLegacy(string b64token)
         {
-            string[] token = b64token.Split('.');
-            
-            Log.Logger.Information(Encoding.UTF8.GetString(
-                    Convert.FromBase64String(token[0])
-                    ));
-            
-            UserToken? ut = System.Text.Json.JsonSerializer.Deserialize<UserToken>(
-                Encoding.UTF8.GetString(
-                    Convert.FromBase64String(token[0])
-                    )
-                );
-            if (ut == null) return null;
-            return await db.Users.Include(u => u.Roles).FirstOrDefaultAsync(u => u.Id == ut.Sub);
+            string[] parts = b64token.Split('.');
 
+            Log.Logger.Information(Encoding.UTF8.GetString(Convert.FromBase64String(parts[0])));
+
+            UserToken? ut = System.Text.Json.JsonSerializer.Deserialize<UserToken>(
+                Encoding.UTF8.GetString(Convert.FromBase64String(parts[0])));
+
+            if (ut == null) return null;
+            return await db.Users.Include(u => u.Roles)
+                .FirstOrDefaultAsync(u => u.Id == ut.Sub);
         }
 
-        
+        // ── Public API ────────────────────────────────────────────────────────
+
+        public string GenerateToken(UserToken token)
+        {
+            string tokenstr    = System.Text.Json.JsonSerializer.Serialize(token,
+                new System.Text.Json.JsonSerializerOptions { AllowTrailingCommas = false, WriteIndented = false });
+            string tokenBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(tokenstr), Base64FormattingOptions.None);
+            string signature   = Convert.ToBase64String(sc.SignData(tokenstr), Base64FormattingOptions.None);
+            return $"{tokenBase64}.{signature}";
+        }
+
+        public bool VerifyToken(string b64token) =>
+            IsJwt(b64token) ? VerifyJwt(b64token) : VerifyLegacy(b64token);
+
+        public async Task<User?> RetrieveUser(string b64token) =>
+            IsJwt(b64token)
+                ? await RetrieveUserFromJwt(b64token)
+                : await RetrieveUserLegacy(b64token);
     }
+
     public class RefreshToken
     {
         [Key]

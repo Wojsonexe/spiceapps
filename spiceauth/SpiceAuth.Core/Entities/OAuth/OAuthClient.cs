@@ -21,6 +21,12 @@ public class OAuthClient : BaseEntity
 
     public bool RequireConsent { get; set; }
     public bool RequirePkce { get; set; }
+
+    /// <summary>First-party clients owned by this service. Consent screen is always skipped.</summary>
+    public bool FirstParty { get; set; } = false;
+
+    /// <summary>Increment to force re-consent from all users on next authorization.</summary>
+    public int ConsentVersion { get; set; } = 1;
     public int AccessTokenLifetime { get; set; } = 900;
     public int RefreshTokenLifetime { get; set; } = 604800;
     public bool IsActive { get; set; } = true;

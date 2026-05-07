@@ -1,46 +1,39 @@
-using SpiceAuth.API.Controllers;
+using SpiceAuth.Application.Services.RateLimit;
+using SpiceAuth.Infrastructure.Services;
 
 namespace SpiceAuth.API.Services;
 
-public class RateLimitCleanupService : BackgroundService
+public sealed class RateLimitCleanupService(
+    IRateLimitService rateLimiter,
+    ILogger<RateLimitCleanupService> logger) : BackgroundService
 {
-    private readonly ILogger<RateLimitCleanupService> _logger;
-
-    public RateLimitCleanupService(ILogger<RateLimitCleanupService> logger)
-    {
-        _logger = logger;
-    }
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("🧹 Rate limit cleanup service started");
-        
+        logger.LogInformation("Rate limit cleanup service started (hourly)");
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
-                
-                var (clientsRemoved, loginsRemoved) = OAuthController.CleanupExpiredLocks();
-                
-                if (clientsRemoved > 0 || loginsRemoved > 0)
+
+                if (rateLimiter is InMemoryRateLimitService impl)
                 {
-                    _logger.LogInformation(
-                        "🧹 Rate limit cleanup: {ClientsRemoved} client locks, {LoginsRemoved} login locks removed",
-                        clientsRemoved, loginsRemoved);
+                    var removed = impl.Cleanup();
+                    if (removed > 0)
+                        logger.LogInformation("Rate limit cleanup: {Removed} stale entries removed", removed);
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
-                // Normal shutdown
                 break;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Rate limit cleanup error");
+                logger.LogError(ex, "Rate limit cleanup error");
             }
         }
-        
-        _logger.LogInformation("🧹 Rate limit cleanup service stopped");
+
+        logger.LogInformation("Rate limit cleanup service stopped");
     }
 }

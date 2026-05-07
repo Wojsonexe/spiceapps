@@ -63,6 +63,7 @@ public interface IOAuthService
     Task<OAuthClient?> GetClientByIdAsync(Guid clientId);
     Task<OAuthClient?> GetClientByClientIdAsync(string clientId);
     Task<bool> ValidateClientAsync(string clientId, string? clientSecret = null);
+    Task ValidateClientCredentialsAsync(string clientId, string? clientSecret);
     Task<bool> ValidateRedirectUriAsync(Guid clientId, string redirectUri);
 
     // ─────────────────────────────────────────────

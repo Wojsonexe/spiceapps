@@ -133,6 +133,48 @@ export const registrationApi = {
     },
 };
 
+// ─── Admin ────────────────────────────────────────────────────────────────────
+
+export const adminApi = {
+    getUsers: async (page = 1, pageSize = 50, search?: string) => {
+        const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+        if (search) params.set('search', search);
+        const { data } = await api.get(`/api/admin/users?${params}`);
+        return data;
+    },
+
+    getUser: async (id: string) => {
+        const { data } = await api.get(`/api/admin/users/${id}`);
+        return data;
+    },
+
+    getRoles: async (): Promise<{ id: string; name: string; description: string | null; isSystemRole: boolean }[]> => {
+        const { data } = await api.get('/api/admin/roles');
+        return data;
+    },
+
+    getUserRoles: async (userId: string): Promise<{ id: string; name: string; description: string | null; assignedAt: string }[]> => {
+        const { data } = await api.get(`/api/admin/users/${userId}/roles`);
+        return data;
+    },
+
+    assignRole: async (userId: string, roleName: string): Promise<void> => {
+        await api.post(`/api/admin/users/${userId}/roles/${encodeURIComponent(roleName)}`);
+    },
+
+    removeRole: async (userId: string, roleName: string): Promise<void> => {
+        await api.delete(`/api/admin/users/${userId}/roles/${encodeURIComponent(roleName)}`);
+    },
+
+    suspendUser: async (userId: string): Promise<void> => {
+        await api.patch(`/api/admin/users/${userId}/suspend`);
+    },
+
+    activateUser: async (userId: string): Promise<void> => {
+        await api.patch(`/api/admin/users/${userId}/activate`);
+    },
+};
+
 // ─── Well-Known ───────────────────────────────────────────────────────────────
 
 export const wellKnownApi = {

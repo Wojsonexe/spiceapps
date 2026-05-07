@@ -7,10 +7,23 @@ namespace SpiceAuth.Infrastructure.Services;
 
 public interface IKeyManagementService
 {
-    Task<SigningKey> GetActiveKeyAsync();
+    /// <summary>Returns the current primary signing key (used to sign new JWTs).</summary>
+    Task<SigningKey> GetPrimaryKeyAsync();
+
+    /// <summary>Returns all active keys (primary + recently-active non-retired) for JWKS/verification.</summary>
     Task<List<SigningKey>> GetActiveKeysAsync();
+
+    /// <summary>Creates a new RSA keypair, promotes it to primary, keeps old primary active for grace.</summary>
     Task<SigningKey> CreateNewKeyAsync();
+
+    /// <summary>Full rotation: create new primary, retire keys expired > 30 days ago.</summary>
     Task RotateKeysAsync();
+
+    /// <summary>Ensures at least one active primary key exists. Idempotent bootstrap call.</summary>
+    Task EnsureBootstrapKeyAsync();
+
+    // Legacy alias — returns primary key (same as GetPrimaryKeyAsync)
+    Task<SigningKey> GetActiveKeyAsync();
 }
 
 public class KeyManagementService(
@@ -20,79 +33,105 @@ public class KeyManagementService(
     private readonly DbContext _context = context;
     private readonly ILogger<KeyManagementService> _logger = logger;
 
-    public async Task<SigningKey> GetActiveKeyAsync()
+    private static readonly TimeSpan KeyLifetime    = TimeSpan.FromDays(90);
+    private static readonly TimeSpan RetireAfter    = TimeSpan.FromDays(30); // after expiry
+
+    public async Task<SigningKey> GetPrimaryKeyAsync()
     {
-        var activeKey = await _context.Set<SigningKey>()
-            .Where(k => k.IsActive)
+        var key = await _context.Set<SigningKey>()
+            .Where(k => k.IsActive && k.IsPrimary && k.ExpiresAt > DateTime.UtcNow)
             .OrderByDescending(k => k.CreatedAt)
             .FirstOrDefaultAsync();
 
-        if (activeKey == null)
+        if (key is null)
         {
-            _logger.LogWarning("No active signing key found, creating new one");
-            activeKey = await CreateNewKeyAsync();
+            _logger.LogWarning("No active primary signing key — bootstrapping");
+            key = await CreateNewKeyAsync();
         }
 
-        return activeKey;
+        return key;
     }
+
+    // Legacy alias
+    public Task<SigningKey> GetActiveKeyAsync() => GetPrimaryKeyAsync();
 
     public async Task<List<SigningKey>> GetActiveKeysAsync()
     {
-        // Return current active key + previous key (for rotation grace period)
+        // JWKS should include: primary + active non-primary (grace period for existing tokens)
+        // Exclude keys retired > 24h ago so consumers have time to cache-bust
+        var graceCutoff = DateTime.UtcNow.AddHours(-24);
+
         return await _context.Set<SigningKey>()
-            .Where(k => k.IsActive || (k.RetiredAt.HasValue && k.RetiredAt.Value > DateTime.UtcNow.AddHours(-24)))
-            .OrderByDescending(k => k.CreatedAt)
-            .Take(2)
+            .Where(k => k.IsActive ||
+                       (k.RetiredAt.HasValue && k.RetiredAt.Value > graceCutoff))
+            .OrderByDescending(k => k.IsPrimary)
+            .ThenByDescending(k => k.CreatedAt)
             .ToListAsync();
     }
 
     public async Task<SigningKey> CreateNewKeyAsync()
     {
+        // Atomically demote the current primary before inserting the new one
+        await _context.Set<SigningKey>()
+            .Where(k => k.IsPrimary)
+            .ExecuteUpdateAsync(s => s.SetProperty(k => k.IsPrimary, false));
+
         using var rsa = RSA.Create(2048);
-        
-        var privateKey = Convert.ToBase64String(rsa.ExportRSAPrivateKey());
-        var publicKey = Convert.ToBase64String(rsa.ExportRSAPublicKey());
-        
-        var keyId = Guid.NewGuid().ToString("N")[..16]; // Short kid
+        var kid = GenerateKid();
 
         var signingKey = new SigningKey
         {
-            Id = Guid.NewGuid(),
-            KeyId = keyId,
-            Algorithm = "RS256",
-            PublicKey = publicKey,
-            PrivateKey = privateKey,
-            IsActive = true,
-            CreatedAt = DateTime.UtcNow,
+            Id          = Guid.NewGuid(),
+            KeyId       = kid,
+            Algorithm   = "RS256",
+            PublicKey   = Convert.ToBase64String(rsa.ExportRSAPublicKey()),
+            PrivateKey  = Convert.ToBase64String(rsa.ExportRSAPrivateKey()),
+            IsActive    = true,
+            IsPrimary   = true,
+            CreatedAt   = DateTime.UtcNow,
             ActivatedAt = DateTime.UtcNow,
-            ExpiresAt = DateTime.UtcNow.AddDays(90),
+            ExpiresAt   = DateTime.UtcNow.Add(KeyLifetime),
         };
 
         _context.Set<SigningKey>().Add(signingKey);
         await _context.SaveChangesAsync();
 
-        _logger.LogInformation("Created new signing key: {KeyId}", keyId);
-
+        _logger.LogInformation("New primary signing key created: {Kid}", kid);
         return signingKey;
     }
 
     public async Task RotateKeysAsync()
     {
-        var activeKeys = await _context.Set<SigningKey>()
-            .Where(k => k.IsActive)
-            .ToListAsync();
+        var newKey = await CreateNewKeyAsync();
 
-        // Mark old keys as retired
-        foreach (var key in activeKeys)
-        {
-            key.IsActive = false;
-            key.RetiredAt = DateTime.UtcNow;
-        }
+        // Retire keys whose expiry was more than RetireAfter ago
+        var retireCutoff = DateTime.UtcNow - RetireAfter;
+        var retired = await _context.Set<SigningKey>()
+            .Where(k => k.IsActive && !k.IsPrimary && k.ExpiresAt < retireCutoff)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(k => k.IsActive, false)
+                .SetProperty(k => k.RetiredAt, DateTime.UtcNow));
 
-        // Create new key
-        await CreateNewKeyAsync();
-        await _context.SaveChangesAsync();
-
-        _logger.LogInformation("Rotated signing keys, {Count} keys retired", activeKeys.Count);
+        _logger.LogInformation(
+            "Key rotation complete. New primary: {Kid}. Retired: {Count} expired keys.",
+            newKey.KeyId, retired);
     }
+
+    public async Task EnsureBootstrapKeyAsync()
+    {
+        var hasActive = await _context.Set<SigningKey>()
+            .AnyAsync(k => k.IsActive && k.IsPrimary && k.ExpiresAt > DateTime.UtcNow);
+
+        if (!hasActive)
+        {
+            _logger.LogInformation("EnsureBootstrapKeyAsync: no active primary key — creating bootstrap key");
+            await CreateNewKeyAsync();
+        }
+    }
+
+    private static string GenerateKid() =>
+        Convert.ToBase64String(RandomNumberGenerator.GetBytes(8))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
 }

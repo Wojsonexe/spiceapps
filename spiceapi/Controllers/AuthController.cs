@@ -1,10 +1,11 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
 using SpiceAPI.Auth;
 using SpiceAPI.Helpers;
 using SpiceAPI.Models;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -17,14 +18,20 @@ namespace SpiceAPI.Controllers
         private readonly DataContext db;
         private readonly Crypto crypto;
         private readonly Token tg;
+        private readonly IHttpClientFactory _http;
+        private readonly IConfiguration _config;
 
         private bool AuthLimitEnabled = false;
         private string AuthSecHeader = "";
-        public AuthController(DataContext dataContext, Crypto crt, Token token)
+
+        public AuthController(DataContext dataContext, Crypto crt, Token token,
+            IHttpClientFactory http, IConfiguration config)
         {
             db = dataContext;
             crypto = crt;
             tg = token;
+            _http = http;
+            _config = config;
             var authsec = Environment.GetEnvironmentVariable("AUTHSEC");
             if (string.IsNullOrWhiteSpace(authsec) || authsec == "none")
             {
@@ -54,6 +61,17 @@ namespace SpiceAPI.Controllers
             public string Department { get; set; }
         }
 
+        public class TokenResponse //returning tokens as response body
+        {
+            public string Access_Token { get; set; }
+            public string Refresh_Token { get; set; }
+        }
+
+        private record SpiceAuthResponse(
+            string? access_token,
+            string? refresh_token,
+            int     expires_in);
+
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] LoginHeaders form)
         {
@@ -78,20 +96,16 @@ namespace SpiceAPI.Controllers
                 }
             }
 
-
-
-            User? user = await db.Users.Where(u => u.Email == form.Login).FirstOrDefaultAsync(); //retrieve the user with the email
+            User? user = await db.Users.Where(u => u.Email == form.Login).FirstOrDefaultAsync();
             if (user == null)
             {
-                //who are we loggin' as? nonexistant one ig
                 return NotFound();
             }
 
-            bool passwordTest = crypto.TestPassword(form.Password, user.Password); //test password hashes
+            bool passwordTest = crypto.TestPassword(form.Password, user.Password);
 
             if (passwordTest)
             {
-
                 if (AuthLimitEnabled) //clear login attempts to zero
                 {
                     var ip = Request.Headers[AuthSecHeader].FirstOrDefault();
@@ -104,22 +118,53 @@ namespace SpiceAPI.Controllers
                         await db.SaveChangesAsync();
                     }
                 }
-                //generate access and refresh tokens
-                UserToken utok = new UserToken(user.Id, user.FirstName, user.LastName, user.Email);
-                string atok = tg.GenerateToken(utok);
 
-                RefreshToken rtok = new RefreshToken();
-                rtok.UserID = user.Id;
-                rtok.Token = crypto.RandomToken(512);
+                // ── delegate token issuance to SpiceAuth ──────────────────────
+                var secret = _config["SpiceAuth:InternalSecret"]
+                    ?? throw new InvalidOperationException("SpiceAuth:InternalSecret not configured");
 
-                await db.RefreshTokens.AddAsync(rtok);
-                await db.SaveChangesAsync();
+                var httpClient = _http.CreateClient("spiceauth");
+                var payload = new
+                {
+                    userId    = user.Id,
+                    clientId  = "spiceapi-internal",
+                    scope     = "openid profile",
+                    email     = user.Email,
+                    firstName = user.FirstName,
+                    lastName  = user.LastName,
+                    isApproved = user.IsApproved
+                };
 
-                TokenResponse response = new TokenResponse();
-                response.Refresh_Token = rtok.Token;
-                response.Access_Token = atok;
+                SpiceAuthResponse? tokens = null;
+                for (int attempt = 1; attempt <= 3; attempt++)
+                {
+                    try
+                    {
+                        var req = new HttpRequestMessage(HttpMethod.Post, "/api/internal/issue-token")
+                        {
+                            Content = JsonContent.Create(payload)
+                        };
+                        req.Headers.Add("X-Internal-Secret", secret);
 
-                return Ok(response); //return two tokens, in format depending on MIME type (default: application/json)
+                        var resp = await httpClient.SendAsync(req);
+                        resp.EnsureSuccessStatusCode();
+                        tokens = await resp.Content.ReadFromJsonAsync<SpiceAuthResponse>();
+                        break;
+                    }
+                    catch (HttpRequestException) when (attempt < 3)
+                    {
+                        await Task.Delay(200);
+                    }
+                }
+
+                if (tokens?.access_token is null || tokens.refresh_token is null)
+                    return StatusCode(502, new ErrorResponse("Authentication service unavailable", "AUTH_SERVICE_DOWN"));
+
+                return Ok(new TokenResponse
+                {
+                    Access_Token  = tokens.access_token,
+                    Refresh_Token = tokens.refresh_token
+                });
             }
 
             else
@@ -177,11 +222,6 @@ namespace SpiceAPI.Controllers
                 errors.Add(new("Hasło musi zawierać co najmniej jedną cyfrę lub znak specjalny.", "PASSWORD_NO_SPECIAL"));
 
             return errors.Count == 0;
-        }
-        public class TokenResponse //returning tokens as response body
-        {
-            public string Access_Token { get; set; }
-            public string Refresh_Token { get; set; }
         }
 
         [HttpPost("register")]
@@ -246,9 +286,6 @@ namespace SpiceAPI.Controllers
             await db.Users.AddAsync(user);
             await db.SaveChangesAsync();
 
-
-
-
             return Ok(new UserInfo(user));
         }
 
@@ -262,21 +299,51 @@ namespace SpiceAPI.Controllers
             User? user = await tg.RetrieveUser(Authorization);
             if (user == null) { return BadRequest("NULL USER"); }
 
-            List<RefreshToken> cort = await db.RefreshTokens.Where(u => u.UserID == user.Id).ToListAsync();
+            var secret = _config["SpiceAuth:InternalSecret"]
+                ?? throw new InvalidOperationException("SpiceAuth:InternalSecret not configured");
 
-            db.RefreshTokens.RemoveRange(cort);
-            await db.SaveChangesAsync();
-            return Ok(cort.Count);
+            var httpClient = _http.CreateClient("spiceauth");
+            var req = new HttpRequestMessage(HttpMethod.Post, "/api/internal/revoke-all-tokens")
+            {
+                Content = JsonContent.Create(new { userId = user.Id })
+            };
+            req.Headers.Add("X-Internal-Secret", secret);
+
+            HttpResponseMessage resp;
+            try { resp = await httpClient.SendAsync(req); }
+            catch (HttpRequestException) { return StatusCode(502, new ErrorResponse("Authentication service unavailable", "AUTH_SERVICE_DOWN")); }
+
+            if (!resp.IsSuccessStatusCode)
+                return StatusCode(502, new ErrorResponse("Authentication service error", "AUTH_SERVICE_ERROR"));
+
+            return Ok();
         }
 
         [HttpGet("logout")]
         public async Task<IActionResult> Logout([FromHeader] string? Authorization)
         {
             if (Authorization == null) { return BadRequest("Provide the refresh token to continue"); }
-            RefreshToken? rt = await db.RefreshTokens.FindAsync(Authorization);
-            if (rt == null) { return BadRequest("This token does not exist"); }
-            db.RefreshTokens.Remove(rt);
-            await db.SaveChangesAsync();
+
+            var secret = _config["SpiceAuth:InternalSecret"]
+                ?? throw new InvalidOperationException("SpiceAuth:InternalSecret not configured");
+
+            var httpClient = _http.CreateClient("spiceauth");
+            var req = new HttpRequestMessage(HttpMethod.Post, "/api/internal/revoke-token")
+            {
+                Content = JsonContent.Create(new { refreshToken = Authorization })
+            };
+            req.Headers.Add("X-Internal-Secret", secret);
+
+            HttpResponseMessage resp;
+            try { resp = await httpClient.SendAsync(req); }
+            catch (HttpRequestException) { return StatusCode(502, new ErrorResponse("Authentication service unavailable", "AUTH_SERVICE_DOWN")); }
+
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                return BadRequest("This token does not exist");
+
+            if (!resp.IsSuccessStatusCode)
+                return StatusCode(502, new ErrorResponse("Authentication service error", "AUTH_SERVICE_ERROR"));
+
             return Ok();
         }
 
@@ -297,15 +364,30 @@ namespace SpiceAPI.Controllers
         public async Task<IActionResult> GenerateAccess([FromHeader] string? Authorization)
         {
             if (Authorization == null) { return Unauthorized("Provide refresh token to continue"); }
-            RefreshToken? rt = await db.RefreshTokens.FindAsync(Authorization);
-            if (rt == null) { return NotFound("No such refresh token exists"); }
-            User? user = await db.Users.FindAsync(rt.UserID);
-            if (user == null)
+
+            var secret = _config["SpiceAuth:InternalSecret"]
+                ?? throw new InvalidOperationException("SpiceAuth:InternalSecret not configured");
+
+            var httpClient = _http.CreateClient("spiceauth");
+            var req = new HttpRequestMessage(HttpMethod.Post, "/api/internal/refresh-token")
             {
-                return StatusCode(418, "HUH, how's that possible?");
-            }
-            UserToken token = new UserToken(user.Id, user.FirstName, user.LastName, user.Email);
-            return Ok(tg.GenerateToken(token));
+                Content = JsonContent.Create(new { refreshToken = Authorization })
+            };
+            req.Headers.Add("X-Internal-Secret", secret);
+
+            HttpResponseMessage resp;
+            try { resp = await httpClient.SendAsync(req); }
+            catch (HttpRequestException) { return StatusCode(502, new ErrorResponse("Authentication service unavailable", "AUTH_SERVICE_DOWN")); }
+
+            if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                return NotFound("No such refresh token exists");
+
+            if (!resp.IsSuccessStatusCode)
+                return StatusCode(502, new ErrorResponse("Authentication service error", "AUTH_SERVICE_ERROR"));
+
+            var accessToken = await resp.Content.ReadAsStringAsync();
+            return Content(accessToken, "text/plain");
         }
 
         public class ChangePasswordBody { public string OldPassword { get; set; } public string NewPassword { get; set; } }

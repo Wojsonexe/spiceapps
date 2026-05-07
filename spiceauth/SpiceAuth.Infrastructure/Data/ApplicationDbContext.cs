@@ -8,6 +8,7 @@ using SpiceAuth.Core.Entities.OAuth;
 using SpiceAuth.Core.Entities.Organization;
 using SpiceAuth.Core.Entities.Registration;
 using SpiceAuth.Core.Entities.Security;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
 namespace SpiceAuth.Infrastructure.Data;
 
@@ -35,16 +36,33 @@ public class ApplicationDbContext
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
     public DbSet<ConsentGrant> ConsentGrants => Set<ConsentGrant>();
 
+    // ── Federation ──────────────────────────────────────────────────────────
+    public DbSet<GlobalSession> GlobalSessions => Set<GlobalSession>();
+    public DbSet<AppSession> AppSessions => Set<AppSession>();
+    public DbSet<FederationDispatch> FederationDispatches => Set<FederationDispatch>();
+    public DbSet<FederationDispatchAttempt> FederationDispatchAttempts => Set<FederationDispatchAttempt>();
+
+    // ── OAuth secrets (versioned rotation) ─────────────────────────────────
+    public DbSet<ClientSecret> ClientSecrets => Set<ClientSecret>();
+
+    // ── Replay cache (generic, DB-backed) ──────────────────────────────────
+    public DbSet<ReplayCacheEntry> ReplayCacheEntries => Set<ReplayCacheEntry>();
+
     // ── Organization ────────────────────────────────────────────────────────
     public DbSet<Organization> Organizations => Set<Organization>();
     public DbSet<OrganizationMember> OrganizationMembers => Set<OrganizationMember>();
     public DbSet<OrganizationInvitation> OrganizationInvitations => Set<OrganizationInvitation>();
+
+    // ── Tenant ──────────────────────────────────────────────────────────────
+    public DbSet<Tenant> Tenants => Set<Tenant>();
+    public DbSet<TenantMembership> TenantMemberships => Set<TenantMembership>();
 
     // ── Security ────────────────────────────────────────────────────────────
     public DbSet<SigningKey> SigningKeys => Set<SigningKey>();
     public DbSet<MfaSettings> MfaSettings => Set<MfaSettings>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<SecurityEvent> SecurityEvents => Set<SecurityEvent>();
+    public DbSet<LogoutTokenJti> LogoutTokenJtis => Set<LogoutTokenJti>();
 
     // ── Registration ────────────────────────────────────────────────────────
     public DbSet<RegistrationRequest> RegistrationRequests => Set<RegistrationRequest>();
@@ -56,9 +74,12 @@ public class ApplicationDbContext
         ConfigureIdentityTables(modelBuilder);
         ConfigureAuthorization(modelBuilder);
         ConfigureOAuth(modelBuilder);
+        ConfigureFederation(modelBuilder);
         ConfigureOrganization(modelBuilder);
+        ConfigureTenant(modelBuilder);
         ConfigureSecurity(modelBuilder);
         ConfigureIdentityExtensions(modelBuilder);
+        ConfigurePhase3Entities(modelBuilder);
         ConfigureIndexes(modelBuilder);
     }
 
@@ -168,6 +189,10 @@ public class ApplicationDbContext
             e.HasKey(ac => ac.Id);
             e.Property(ac => ac.Code).HasMaxLength(500).IsRequired();
 
+            // Optimistic concurrency — prevents double-redemption.
+            // EF generates WHERE IsUsed = @original on UPDATE; if 0 rows, throws DbUpdateConcurrencyException.
+            e.Property(ac => ac.IsUsed).IsConcurrencyToken();
+
             e.HasOne(ac => ac.Client)
                 .WithMany(c => c.AuthorizationCodes)
                 .HasForeignKey(ac => ac.ClientId)
@@ -212,6 +237,66 @@ public class ApplicationDbContext
 
             // Unique: jeden consent na parę (User, Client)
             e.HasIndex(cg => new { cg.UserId, cg.ClientId }).IsUnique();
+        });
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Federation: GlobalSession + AppSession
+    // ════════════════════════════════════════════════════════════════════════
+    private static void ConfigureFederation(ModelBuilder b)
+    {
+        b.Entity<GlobalSession>(e =>
+        {
+            e.ToTable("global_sessions");
+            e.HasKey(s => s.Id);
+            e.Property(s => s.Sid).HasMaxLength(256).IsRequired();
+            e.HasIndex(s => s.Sid).IsUnique();
+            e.HasIndex(s => s.UserId);
+            e.HasIndex(s => s.ExpiresAt);
+            e.HasIndex(s => new { s.UserId, s.RevokedAt });
+        });
+
+        b.Entity<AppSession>(e =>
+        {
+            e.ToTable("app_sessions");
+            e.HasKey(s => s.Id);
+            e.Property(s => s.AppName).HasMaxLength(200).IsRequired();
+            e.Property(s => s.BackchannelLogoutUri).HasMaxLength(2048).IsRequired();
+
+            e.HasOne(s => s.GlobalSession)
+                .WithMany(g => g.AppSessions)
+                .HasForeignKey(s => s.GlobalSessionId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Unique: one app can register at most one session per GlobalSession
+            e.HasIndex(s => new { s.GlobalSessionId, s.AppName }).IsUnique();
+            e.HasIndex(s => s.GlobalSessionId);
+        });
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Tenant (multi-tenant foundation — nullable, additive)
+    // ════════════════════════════════════════════════════════════════════════
+    private static void ConfigureTenant(ModelBuilder b)
+    {
+        b.Entity<Tenant>(e =>
+        {
+            e.ToTable("tenants");
+            e.HasKey(t => t.Id);
+            e.Property(t => t.Slug).HasMaxLength(100).IsRequired();
+            e.HasIndex(t => t.Slug).IsUnique();
+        });
+
+        b.Entity<TenantMembership>(e =>
+        {
+            e.ToTable("tenant_memberships");
+            e.HasKey(m => m.Id);
+            e.HasIndex(m => new { m.TenantId, m.UserId }).IsUnique();
+
+            e.HasOne(m => m.Tenant)
+                .WithMany(t => t.Memberships)
+                .HasForeignKey(m => m.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
     }
 
@@ -282,6 +367,9 @@ public class ApplicationDbContext
             e.HasKey(sk => sk.Id);
             e.Property(sk => sk.KeyId).HasMaxLength(100).IsRequired();
             e.HasIndex(sk => sk.KeyId).IsUnique();
+            // Partial index for fast primary-key lookup (only one row should ever match)
+            e.HasIndex(sk => sk.IsPrimary);
+            e.HasIndex(sk => new { sk.IsActive, sk.IsPrimary, sk.ExpiresAt });
         });
 
         b.Entity<AuditLog>(e =>
@@ -295,6 +383,14 @@ public class ApplicationDbContext
         {
             e.ToTable("security_events");
             e.HasKey(se => se.Id);
+        });
+
+        b.Entity<LogoutTokenJti>(e =>
+        {
+            e.ToTable("logout_token_jtis");
+            e.HasKey(j => j.Jti);
+            e.Property(j => j.Jti).HasMaxLength(256);
+            e.HasIndex(j => j.UsedAt);   // for TTL cleanup
         });
     }
 
@@ -359,6 +455,66 @@ public class ApplicationDbContext
     }
 
     // ════════════════════════════════════════════════════════════════════════
+    // Phase 3: FederationDispatch, ClientSecret, ReplayCacheEntry
+    // ════════════════════════════════════════════════════════════════════════
+    private static void ConfigurePhase3Entities(ModelBuilder b)
+    {
+        b.Entity<FederationDispatch>(e =>
+        {
+            e.ToTable("federation_dispatches");
+            e.HasKey(d => d.Id);
+            e.Property(d => d.Sid).HasMaxLength(256).IsRequired();
+            e.Property(d => d.AppName).HasMaxLength(200).IsRequired();
+            e.Property(d => d.BackchannelLogoutUri).HasMaxLength(2048).IsRequired();
+            e.Property(d => d.DispatchId).HasMaxLength(64).IsRequired();
+            e.Property(d => d.Status).HasConversion<int>();
+            e.HasIndex(d => d.Status);
+            e.HasIndex(d => d.NextAttemptAt);
+            e.HasIndex(d => d.GlobalSessionId);
+
+            e.HasMany(d => d.Attempts)
+                .WithOne(a => a.Dispatch)
+                .HasForeignKey(a => a.FederationDispatchId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<FederationDispatchAttempt>(e =>
+        {
+            e.ToTable("federation_dispatch_attempts");
+            e.HasKey(a => a.Id);
+            e.Property(a => a.ErrorMessage).HasMaxLength(1000);
+            e.HasIndex(a => a.FederationDispatchId);
+        });
+
+        b.Entity<ClientSecret>(e =>
+        {
+            e.ToTable("client_secrets");
+            e.HasKey(s => s.Id);
+            e.Property(s => s.Prefix).HasMaxLength(32).IsRequired();
+            e.Property(s => s.Name).HasMaxLength(200);
+
+            e.HasOne(s => s.Client)
+                .WithMany()
+                .HasForeignKey(s => s.ClientInternalId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Prefix lookup for fast O(1) auth without loading all secrets
+            e.HasIndex(s => s.Prefix);
+            e.HasIndex(s => new { s.ClientInternalId, s.IsActive });
+        });
+
+        b.Entity<ReplayCacheEntry>(e =>
+        {
+            e.ToTable("replay_cache_entries");
+            e.HasKey(r => r.Id);
+            e.Property(r => r.EntryKey).HasMaxLength(512).IsRequired();
+            e.Property(r => r.Bucket).HasMaxLength(100).IsRequired();
+            e.HasIndex(r => r.EntryKey).IsUnique();
+            e.HasIndex(r => r.ExpiresAt);   // cleanup
+        });
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
     // Indexes — performance dla auth queries
     // ════════════════════════════════════════════════════════════════════════
     private static void ConfigureIndexes(ModelBuilder b)
@@ -380,6 +536,9 @@ public class ApplicationDbContext
             .HasIndex(rt => new { rt.UserId, rt.ClientId });
         b.Entity<RefreshToken>()
             .HasIndex(rt => rt.ExpiresAt);              // cleanup
+        // FamilyId — used by RevokeTokenFamilyAsync on reuse detection (security-critical fast path)
+        b.Entity<RefreshToken>()
+            .HasIndex(rt => rt.FamilyId);
 
         // LoginAttempt — brute force detection
         b.Entity<LoginAttempt>()

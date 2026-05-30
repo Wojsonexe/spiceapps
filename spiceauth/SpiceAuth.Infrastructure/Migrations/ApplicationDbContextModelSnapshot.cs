@@ -1169,6 +1169,9 @@ namespace SpiceAuth.Infrastructure.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
 
+                    b.Property<bool>("IsPrimary")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("KeyId")
                         .IsRequired()
                         .HasMaxLength(100)

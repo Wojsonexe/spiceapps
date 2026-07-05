@@ -105,6 +105,7 @@ public class TokenService(
     public async Task<string> GenerateIdTokenAsync(
         Guid userId,
         Guid clientId,
+        string clientIdentifier,   // publiczny client_id, np. "520c0607..."
         string nonce,
         string[]? audiences = null)
     {
@@ -119,7 +120,6 @@ public class TokenService(
 
         var claims = BuildBaseClaims(userId, now);
 
-        // OIDC required: auth_time
         claims.Add(new Claim("auth_time",
             new DateTimeOffset(now).ToUnixTimeSeconds().ToString(),
             ClaimValueTypes.Integer64));
@@ -130,10 +130,10 @@ public class TokenService(
         if (user is not null)
             AddUserClaims(claims, user);
 
-        // ID token audience = clientId (OIDC spec §2)
+        // OIDC §2: aud MUST contain the client's client_id (public), not the internal PK
         var aud = audiences?.Length > 0
             ? string.Join(" ", audiences)
-            : clientId.ToString();
+            : clientIdentifier;
 
         var descriptor = new SecurityTokenDescriptor
         {
@@ -147,7 +147,7 @@ public class TokenService(
 
         var token = WriteToken(descriptor, kid, tokenType: "JWT");
 
-        _logger.LogDebug("Generated ID token for user {UserId}, client {ClientId}", userId, clientId);
+        _logger.LogDebug("Generated ID token for user {UserId}, client {ClientId}", userId, clientIdentifier);
         return token;
     }
 

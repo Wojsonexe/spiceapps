@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
-using System.Web;
 using SpiceAuth.Application.Services.Audit;
 using SpiceAuth.Application.Services.Federation;
 using SpiceAuth.Core.Entities.Identity;
@@ -18,10 +17,22 @@ public class AccountController(
     UserManager<ApplicationUser> userManager,
     IFederationService federation,
     IAuditService auditService,
+    IConfiguration configuration,
     ILogger<AccountController> logger) : Controller
 {
     private string Ip() => HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
     private string Ua() => HttpContext.Request.Headers.UserAgent.ToString();
+
+    private IActionResult RedirectToLoginPage(string? returnUrl, string? error = null)
+    {
+        var frontendUrl = configuration["App:FrontendUrl"] ?? "http://localhost:3002";
+        var url = string.IsNullOrEmpty(returnUrl)
+            ? $"{frontendUrl}/login"
+            : $"{frontendUrl}/login?returnUrl={Uri.EscapeDataString(returnUrl)}";
+        if (!string.IsNullOrEmpty(error))
+            url += (url.Contains('?') ? "&" : "?") + $"error={Uri.EscapeDataString(error)}";
+        return Redirect(url);
+    }
 
     [HttpGet("login")]
     public IActionResult Login([FromQuery] string? returnUrl = null)
@@ -32,7 +43,7 @@ public class AccountController(
             returnUrl = null;
         }
 
-        return Content(RenderLoginPage(returnUrl), "text/html");
+        return RedirectToLoginPage(returnUrl);
     }
 
     [HttpPost("login")]
@@ -49,7 +60,7 @@ public class AccountController(
         }
 
         if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password))
-            return Content(RenderLoginPage(returnUrl, "Email i hasło są wymagane."), "text/html");
+            return RedirectToLoginPage(returnUrl, "Email i hasło są wymagane.");
 
         var user = await userManager.FindByEmailAsync(email);
 
@@ -65,7 +76,7 @@ public class AccountController(
                 userAgent: Ua());
 
             logger.LogWarning("Failed login for {Email} from {IP}", email, Ip());
-            return Content(RenderLoginPage(returnUrl, "Nieprawidłowy email lub hasło."), "text/html");
+            return RedirectToLoginPage(returnUrl, "Nieprawidłowy email lub hasło.");
         }
 
         if (!user.IsActive)
@@ -81,7 +92,7 @@ public class AccountController(
                 userAgent: Ua());
 
             logger.LogWarning("Login attempt for inactive user: {Email}", email);
-            return Content(RenderLoginPage(returnUrl, "Konto jest nieaktywne. Skontaktuj się z administratorem."), "text/html");
+            return RedirectToLoginPage(returnUrl, "Konto jest nieaktywne. Skontaktuj się z administratorem.");
         }
 
         // CheckPasswordSignInAsync validates credentials + handles lockout without committing a cookie.
@@ -100,11 +111,11 @@ public class AccountController(
                 userAgent: Ua());
 
             logger.LogWarning("Account locked out: {Email}", email);
-            return Content(RenderLoginPage(returnUrl, "Konto zablokowane. Zbyt wiele prób logowania."), "text/html");
+            return RedirectToLoginPage(returnUrl, "Konto zablokowane. Zbyt wiele prób logowania.");
         }
 
         if (!checkResult.Succeeded)
-            return Content(RenderLoginPage(returnUrl, "Nieprawidłowy email lub hasło."), "text/html");
+            return RedirectToLoginPage(returnUrl, "Nieprawidłowy email lub hasło.");
 
         // Create a GlobalSession — this is the federation anchor for this browser session.
         var globalSession = await federation.CreateGlobalSessionAsync(
@@ -128,7 +139,7 @@ public class AccountController(
 
         var redirectUrl = !string.IsNullOrEmpty(returnUrl) && Url.IsLocalUrl(returnUrl)
             ? returnUrl
-            : "/oauth/authorize";
+            : "/api/oauth/authorize";
 
         return Redirect(redirectUrl);
     }
@@ -137,18 +148,40 @@ public class AccountController(
     [Authorize]
     public async Task<IActionResult> Logout()
     {
+        await PerformLogout();
+        return Redirect("/");
+    }
+
+    /// <summary>
+    /// OIDC RP-Initiated Logout (GET).
+    /// Kaczucha redirects here after clearing its own session.
+    /// Clears the SpiceAuth browser cookie and sends the user to redirect_uri.
+    /// </summary>
+    [HttpGet("logout")]
+    [AllowAnonymous]
+    public async Task<IActionResult> LogoutGet([FromQuery] string? redirect_uri = null)
+    {
+        if (User.Identity?.IsAuthenticated == true)
+            await PerformLogout();
+
+        // Only allow absolute URIs — prevents open redirect to relative paths that
+        // could be confused with local paths on a different host.
+        var safe = !string.IsNullOrEmpty(redirect_uri)
+            && Uri.TryCreate(redirect_uri, UriKind.Absolute, out _);
+
+        return Redirect(safe ? redirect_uri! : "/");
+    }
+
+    private async Task PerformLogout()
+    {
         var email  = User.FindFirstValue(ClaimTypes.Email) ?? "unknown";
         var userId = Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : (Guid?)null;
         var sid    = User.FindFirstValue("sid");
 
-        // Revoke the GlobalSession first (marks revokedAt in DB so any concurrent
-        // authorize request for the same session is forced to re-authenticate).
         if (!string.IsNullOrEmpty(sid))
         {
             await federation.RevokeGlobalSessionAsync(sid);
 
-            // Dispatch backchannel logout tokens to all registered apps.
-            // Fire-and-forget: network I/O to external apps must not block the user's redirect.
             _ = Task.Run(() =>
                 federation.RevokeAndDispatchAsync(sid, clientId: string.Empty, clientSecret: string.Empty)
                     .ContinueWith(t =>
@@ -169,59 +202,5 @@ public class AccountController(
             userAgent: Ua());
 
         logger.LogInformation("User {Email} logged out", email);
-        return Redirect("/");
-    }
-
-    private static string RenderLoginPage(string? returnUrl, string errorMessage = "")
-    {
-        var errorHtml = string.IsNullOrEmpty(errorMessage)
-            ? ""
-            : $"<div class='error'>{HttpUtility.HtmlEncode(errorMessage)}</div>";
-
-        return $@"<!DOCTYPE html>
-<html>
-<head>
-    <title>SpiceAuth - Logowanie</title>
-    <meta charset='utf-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1'>
-    <meta http-equiv='Content-Security-Policy' content=""default-src 'self'; style-src 'unsafe-inline'; script-src 'none';"">
-    <style>
-        *{{margin:0;padding:0;box-sizing:border-box}}
-        body{{font-family:system-ui,-apple-system,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}}
-        .box{{background:white;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.3);max-width:400px;width:100%;overflow:hidden}}
-        .header{{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:32px;text-align:center}}
-        .body{{padding:32px}}
-        .field{{margin-bottom:20px}}
-        input[type=email],input[type=password]{{width:100%;padding:14px;border:2px solid #e1e5e9;border-radius:8px;font-size:16px;transition:border-color .2s}}
-        input[type=email]:focus,input[type=password]:focus{{outline:none;border-color:#667eea}}
-        .remember{{display:flex;align-items:center;gap:8px;margin-bottom:24px}}
-        button{{width:100%;padding:16px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer}}
-        .error{{color:#dc3545;padding:12px;background:#f8d7da;border-radius:6px;border-left:4px solid #dc3545;margin-bottom:16px}}
-    </style>
-</head>
-<body>
-    <div class='box'>
-        <div class='header'>
-            <h1>🔐 SpiceAuth</h1>
-            <p>Zaloguj się aby kontynuować</p>
-        </div>
-        <div class='body'>
-            {errorHtml}
-            <form method='post' action='/oauth/account/login?returnUrl={Uri.EscapeDataString(returnUrl ?? "")}'>
-                <div class='field'>
-                    <input name='email' type='email' placeholder='Email' required autofocus autocomplete='email'>
-                </div>
-                <div class='field'>
-                    <input name='password' type='password' placeholder='Hasło' required autocomplete='current-password'>
-                </div>
-                <div class='remember'>
-                    <input type='checkbox' name='rememberMe' id='rem'>
-                    <label for='rem'>Zapamiętaj mnie</label>
-                </div>
-                <button type='submit'>Zaloguj się</button>
-            </form>
-        </div>
-    </div>
-</body></html>";
     }
 }

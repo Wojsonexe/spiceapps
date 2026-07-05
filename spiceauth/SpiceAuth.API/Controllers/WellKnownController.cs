@@ -43,7 +43,7 @@ public class WellKnownController(
             registration_endpoint = $"{issuer}/api/clients/register",
             revocation_endpoint = $"{issuer}/oauth/revoke",
             introspection_endpoint = $"{issuer}/oauth/introspect",
-            end_session_endpoint = $"{issuer}/oauth/logout",
+            end_session_endpoint = $"{issuer}/oauth/account/logout",
             
             response_types_supported = new[]
             {

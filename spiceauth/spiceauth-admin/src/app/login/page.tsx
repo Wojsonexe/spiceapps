@@ -4,7 +4,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useState, Suspense } from 'react';
+import { useState, Suspense, useEffect } from 'react';
 import { authApi } from '@/lib/api';
 import { useAuthStore } from '@/store/auth';
 import { Button } from '@/components/ui/button';
@@ -30,6 +30,11 @@ function LoginForm() {
 
     const returnUrl = searchParams.get('returnUrl');
     const isOAuthFlow = !!returnUrl;
+    const urlError = searchParams.get('error');
+
+    useEffect(() => {
+        if (urlError) toast.error(urlError);
+    }, [urlError]);
 
     const { register, handleSubmit, formState: { errors } } = useForm<FormData>({
         resolver: zodResolver(schema),
@@ -39,11 +44,11 @@ function LoginForm() {
         setLoading(true);
         try {
             if (isOAuthFlow) {
-                // OAuth flow — przekaż credentials do SpiceAuth przez formularz HTML
-                // Tworzymy i submitujemy ukryty formularz żeby zachować cookies
+                // OAuth flow: POST credentials directly to SpiceAuth to set the session cookie
+                // on the 5045 domain. SpiceAuth then redirects to the authorize endpoint.
                 const form = document.createElement('form');
                 form.method = 'POST';
-                form.action = `${SPICEAUTH_URL}/api/oauth/account/login?returnUrl=${encodeURIComponent(returnUrl)}`;
+                form.action = `${SPICEAUTH_URL}/oauth/account/login?returnUrl=${encodeURIComponent(returnUrl!)}`;
 
                 const addField = (name: string, value: string) => {
                     const input = document.createElement('input');
@@ -53,17 +58,16 @@ function LoginForm() {
                     form.appendChild(input);
                 };
 
-                addField('Email', data.email);
-                addField('Password', data.password);
-                addField('RememberMe', 'false');
+                addField('email', data.email);
+                addField('password', data.password);
+                addField('rememberMe', 'false');
 
                 document.body.appendChild(form);
                 form.submit();
-                // nie ustawiamy setLoading(false) bo przeglądarka przechodzi do innej strony
                 return;
             }
 
-            // Normalny admin login
+            // Admin login
             await authApi.login(data);
             const profile = await authApi.getProfile();
             setUser(profile);

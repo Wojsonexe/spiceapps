@@ -361,9 +361,14 @@ public class OAuthService(
         string? idToken = null;
         if (!string.IsNullOrEmpty(authCode.Nonce) && (authCode.Scope?.Contains("openid") ?? false))
         {
+            var client = await GetClientByIdAsync(clientId)
+                         ?? throw new OAuthException("invalid_client", "Client not found");
+
             idToken = await _tokenService.GenerateIdTokenAsync(
-                authCode.UserId, clientId,
-                authCode.Nonce, [clientId.ToString()]);
+                authCode.UserId,
+                clientId,
+                client.ClientId,
+                authCode.Nonce);
         }
 
         await _context.SaveChangesAsync();

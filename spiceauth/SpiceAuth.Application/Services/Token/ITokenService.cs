@@ -6,7 +6,12 @@ public interface ITokenService
 {
     Task<string> GenerateAccessTokenAsync(TokenRequest request);
     Task<string> GenerateRefreshTokenAsync(Guid userId, Guid clientId, string scope, Guid? organizationId = null);
-    Task<string> GenerateIdTokenAsync(Guid userId, Guid clientId, string nonce, string[]? audiences = null);
+    Task<string> GenerateIdTokenAsync(
+        Guid userId,
+        Guid clientId,
+        string clientIdentifier,
+        string nonce,
+        string[]? audiences = null);
 
     /// <summary>
     /// Generates an OIDC Back-Channel Logout Token (logout+jwt).

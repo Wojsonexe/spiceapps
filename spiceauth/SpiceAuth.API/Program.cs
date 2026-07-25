@@ -151,8 +151,8 @@ builder.Services.ConfigureApplicationCookie(options =>
     };
 });
 
-builder.Services.AddAuthentication()
-    .AddJwtBearer("Bearer", options =>
+var authBuilder = builder.Services.AddAuthentication();
+authBuilder.AddJwtBearer("Bearer", options =>
     {
         var jwtIssuer = builder.Configuration["Jwt:Issuer"]
                         ?? (builder.Environment.IsDevelopment()
@@ -220,13 +220,16 @@ builder.Services.AddAuthentication()
                 return Task.CompletedTask;
             }
         };
-    })
-    .AddDiscord(options =>
+    });
+
+var discordClientId     = builder.Configuration["Discord:ClientId"];
+var discordClientSecret = builder.Configuration["Discord:ClientSecret"];
+if (!string.IsNullOrEmpty(discordClientId) && !string.IsNullOrEmpty(discordClientSecret))
+{
+    authBuilder.AddDiscord(options =>
     {
-        options.ClientId     = builder.Configuration["Discord:ClientId"]
-                               ?? throw new InvalidOperationException("Discord:ClientId not configured");
-        options.ClientSecret = builder.Configuration["Discord:ClientSecret"]
-                               ?? throw new InvalidOperationException("Discord:ClientSecret not configured");
+        options.ClientId     = discordClientId;
+        options.ClientSecret = discordClientSecret;
         options.Scope.Add("identify");
         options.Scope.Add("email");
         options.CallbackPath = "/api/oauth/external/discord/callback";
@@ -235,7 +238,6 @@ builder.Services.AddAuthentication()
         options.CorrelationCookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
         options.Events.OnCreatingTicket = ctx =>
         {
-            // Map Discord's `verified` boolean as a claim so the callback can enforce email-match rules
             if (ctx.User.TryGetProperty("verified", out var verified)
                 && verified.ValueKind == System.Text.Json.JsonValueKind.True)
             {
@@ -243,7 +245,6 @@ builder.Services.AddAuthentication()
                     new System.Security.Claims.Claim("urn:discord:verified", "true"));
             }
 
-            // Build the full CDN avatar URL from id + avatar hash
             if (ctx.User.TryGetProperty("id", out var discordId) &&
                 ctx.User.TryGetProperty("avatar", out var avatarHash) &&
                 avatarHash.ValueKind == System.Text.Json.JsonValueKind.String)
@@ -256,6 +257,11 @@ builder.Services.AddAuthentication()
             return Task.CompletedTask;
         };
     });
+}
+else
+{
+    Log.Warning("⚠️  Discord:ClientId/ClientSecret not configured — Discord OAuth login disabled");
+}
 
 builder.Services.AddAuthorization(options =>
 {

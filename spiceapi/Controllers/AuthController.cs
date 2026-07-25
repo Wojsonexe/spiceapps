@@ -7,6 +7,7 @@ using SpiceAPI.Helpers;
 using SpiceAPI.Models;
 using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace SpiceAPI.Controllers
@@ -142,7 +143,10 @@ namespace SpiceAPI.Controllers
                     {
                         var req = new HttpRequestMessage(HttpMethod.Post, "/api/internal/issue-token")
                         {
-                            Content = JsonContent.Create(payload)
+                            Content = JsonContent.Create(payload, options: new JsonSerializerOptions
+                            {
+                                PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+                            })
                         };
                         req.Headers.Add("X-Internal-Secret", secret);
 

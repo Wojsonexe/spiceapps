@@ -346,6 +346,17 @@ builder.Services.AddHealthChecks()
     .AddDbContextCheck<ApplicationDbContext>("database");
 
 // ════════════════════════════════════════════════════════════════
+// 🔑 DATA PROTECTION — persistent keys survive app restarts
+// Without this, OAuth state encrypted during challenge cannot be
+// decrypted after a restart, causing "state was missing or invalid".
+// ════════════════════════════════════════════════════════════════
+
+builder.Services.AddDataProtection()
+    .PersistKeysToFileSystem(new DirectoryInfo(
+        Path.Combine(builder.Environment.ContentRootPath, "dp-keys")))
+    .SetApplicationName("SpiceAuth");
+
+// ════════════════════════════════════════════════════════════════
 // 📦 DEPENDENCY INJECTION
 // ════════════════════════════════════════════════════════════════
 
@@ -660,6 +671,11 @@ if (swaggerEnabled)
 }
 
 app.UseCors("AllowedOrigins");
+app.UseCookiePolicy(new CookiePolicyOptions
+{
+    MinimumSameSitePolicy = SameSiteMode.Lax,
+    Secure = CookieSecurePolicy.SameAsRequest,
+});
 app.UseAuthentication();
 app.UseAuthorization();
 

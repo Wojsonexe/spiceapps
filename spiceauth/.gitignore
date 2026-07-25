@@ -24,3 +24,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# DataProtection keys (machine-specific)
+dp-keys/

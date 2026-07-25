@@ -404,6 +404,8 @@ public class ApplicationDbContext
             e.ToTable("external_identities");
             e.HasKey(ei => ei.Id);
 
+            e.Property(ei => ei.AvatarUrl).HasMaxLength(500);
+
             e.HasIndex(ei => new { ei.Provider, ei.ProviderUserId }).IsUnique();
 
             e.HasOne(ei => ei.User)

@@ -191,7 +191,32 @@ builder.Services.AddAuthentication()
             },
             OnAuthenticationFailed = context =>
             {
-                Log.Warning("🔒 JWT authentication failed: {Error}", context.Exception.Message);
+                Log.Warning("🔒 [JWT-FAIL] Type={ExType} Message={Msg}\n{Stack}",
+                    context.Exception.GetType().Name,
+                    context.Exception.Message,
+                    context.Exception.ToString());
+                return Task.CompletedTask;
+            },
+            OnChallenge = context =>
+            {
+                Log.Warning("🔒 [JWT-CHALLENGE] Error={Error} ErrorDescription={Desc} AuthenticateFailure={Fail}",
+                    context.Error,
+                    context.ErrorDescription,
+                    context.AuthenticateFailure?.Message);
+                return Task.CompletedTask;
+            },
+            OnMessageReceived = context =>
+            {
+                var authHeader = context.Request.Headers["Authorization"].FirstOrDefault();
+                if (authHeader?.StartsWith("Bearer ") == true)
+                {
+                    var raw = authHeader["Bearer ".Length..];
+                    Log.Debug("🔑 [JWT-RECV] Token starts with: {Prefix}...", raw[..Math.Min(20, raw.Length)]);
+                }
+                else
+                {
+                    Log.Warning("🔑 [JWT-RECV] No Bearer token in Authorization header (value: {H})", authHeader ?? "(empty)");
+                }
                 return Task.CompletedTask;
             }
         };
@@ -206,6 +231,28 @@ builder.Services.AddAuthentication()
         options.Scope.Add("email");
         options.CallbackPath = "/api/oauth/external/discord/callback";
         options.SaveTokens   = true;
+        options.Events.OnCreatingTicket = ctx =>
+        {
+            // Map Discord's `verified` boolean as a claim so the callback can enforce email-match rules
+            if (ctx.User.TryGetProperty("verified", out var verified)
+                && verified.ValueKind == System.Text.Json.JsonValueKind.True)
+            {
+                ctx.Identity!.AddClaim(
+                    new System.Security.Claims.Claim("urn:discord:verified", "true"));
+            }
+
+            // Build the full CDN avatar URL from id + avatar hash
+            if (ctx.User.TryGetProperty("id", out var discordId) &&
+                ctx.User.TryGetProperty("avatar", out var avatarHash) &&
+                avatarHash.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                var avatarUrl = $"https://cdn.discordapp.com/avatars/{discordId.GetString()}/{avatarHash.GetString()}.png";
+                ctx.Identity!.AddClaim(
+                    new System.Security.Claims.Claim("urn:discord:avatar", avatarUrl));
+            }
+
+            return Task.CompletedTask;
+        };
     });
 
 builder.Services.AddAuthorization(options =>

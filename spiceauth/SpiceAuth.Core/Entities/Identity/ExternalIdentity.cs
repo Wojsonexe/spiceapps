@@ -7,6 +7,7 @@ public class ExternalIdentity : BaseEntity
     public string ProviderUserId { get; set; } = null!;
     public string? ProviderUsername { get; set; }
     public string? ProviderEmail { get; set; }
+    public string? AvatarUrl { get; set; }
     public string? AccessToken { get; set; }            // Encrypted at rest
     public string? RefreshToken { get; set; }           // Encrypted at rest
     public DateTime? ExpiresAt { get; set; }

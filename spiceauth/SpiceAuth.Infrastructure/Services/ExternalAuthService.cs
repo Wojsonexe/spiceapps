@@ -22,8 +22,11 @@ public class ExternalAuthService(
         string providerUserId,
         string? email,
         string? username,
-        string? avatarUrl)
+        string? avatarUrl,
+        bool emailVerified = false,
+        Guid? authenticatedUserId = null)
     {
+        // Case 3a: known ExternalIdentity → log in as the linked user
         var existing = await context.Set<ExternalIdentity>()
             .FirstOrDefaultAsync(e =>
                 e.Provider == provider &&
@@ -40,26 +43,53 @@ public class ExternalAuthService(
             return await IssueTokensAsync(knownUser);
         }
 
-        if (!string.IsNullOrEmpty(email))
+        // Case 3b: no ExternalIdentity, but caller has an active session → link
+        if (authenticatedUserId.HasValue)
+        {
+            var sessionUser = await userManager.FindByIdAsync(authenticatedUserId.Value.ToString());
+            if (sessionUser == null)
+                return new ExternalAuthResult(false, null, null, "Użytkownik sesji nie istnieje", null);
+
+            var alreadyHasProvider = await context.Set<ExternalIdentity>()
+                .AnyAsync(e => e.UserId == authenticatedUserId.Value && e.Provider == provider);
+
+            if (alreadyHasProvider)
+            {
+                logger.LogWarning("User {UserId} already has {Provider} linked", authenticatedUserId, provider);
+                return new ExternalAuthResult(false, null, null,
+                    "Discord już jest połączony z tym kontem", null, "already_linked");
+            }
+
+            await CreateExternalIdentityAsync(sessionUser.Id, provider, providerUserId, username, email, avatarUrl);
+            await UpdateLastLoginAsync(sessionUser);
+            logger.LogInformation("External link (session): linked {Provider} to user {UserId}", provider, sessionUser.Id);
+            var linkTokens = await IssueTokensAsync(sessionUser);
+            return linkTokens with { WasLinked = true };
+        }
+
+        // Case 3c: no ExternalIdentity, no session
+        // Email verified and matches existing account → block to prevent account takeover
+        if (emailVerified && !string.IsNullOrEmpty(email))
         {
             var localUser = await userManager.FindByEmailAsync(email);
             if (localUser != null)
             {
-                await CreateExternalIdentityAsync(localUser.Id, provider, providerUserId, username, email);
-                await UpdateLastLoginAsync(localUser);
-                logger.LogInformation(
-                    "External login: linked existing account {UserId} with {Provider}",
-                    localUser.Id, provider);
-                return await IssueTokensAsync(localUser);
+                logger.LogWarning(
+                    "Email conflict: {Provider} email {Email} matches existing account {UserId} — no active session",
+                    provider, email, localUser.Id);
+                return new ExternalAuthResult(false, null, null,
+                    "Konto z tym adresem email już istnieje. Zaloguj się hasłem aby połączyć konta.",
+                    null, "email_conflict");
             }
         }
 
+        // No match → provision new account
         var newUser = new ApplicationUser
         {
             Id                = Guid.NewGuid(),
             Email             = email?.ToLower() ?? $"{provider}_{providerUserId}@external.local",
             UserName          = username ?? $"{provider}_{providerUserId}",
-            EmailConfirmed    = !string.IsNullOrEmpty(email),
+            EmailConfirmed    = emailVerified && !string.IsNullOrEmpty(email),
             IsActive          = true,
             ProfilePictureUrl = avatarUrl,
             CreatedAt         = DateTime.UtcNow,
@@ -75,7 +105,7 @@ public class ExternalAuthService(
         }
 
         await userManager.AddToRoleAsync(newUser, "User");
-        await CreateExternalIdentityAsync(newUser.Id, provider, providerUserId, username, email);
+        await CreateExternalIdentityAsync(newUser.Id, provider, providerUserId, username, email, avatarUrl);
 
         logger.LogInformation("External login: new user {UserId} created via {Provider}", newUser.Id, provider);
         return await IssueTokensAsync(newUser);
@@ -86,7 +116,8 @@ public class ExternalAuthService(
         string provider,
         string providerUserId,
         string? username = null,
-        string? email = null)
+        string? email = null,
+        string? avatarUrl = null)
     {
         var alreadyLinked = await context.Set<ExternalIdentity>()
             .AnyAsync(e => e.Provider == provider && e.ProviderUserId == providerUserId);
@@ -108,7 +139,7 @@ public class ExternalAuthService(
             return false;
         }
 
-        await CreateExternalIdentityAsync(userId, provider, providerUserId, username, email);
+        await CreateExternalIdentityAsync(userId, provider, providerUserId, username, email, avatarUrl);
         logger.LogInformation("Linked {Provider} to user {UserId}", provider, userId);
         return true;
     }
@@ -152,10 +183,11 @@ public class ExternalAuthService(
                 e.ProviderUserId,
                 e.ProviderUsername,
                 e.ProviderEmail,
-                e.LinkedAt))
+                e.LinkedAt,
+                e.AvatarUrl))
             .ToListAsync();
 
-    // ── HELPERS ───────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private async Task<ExternalAuthResult> IssueTokensAsync(ApplicationUser user)
     {
@@ -177,7 +209,7 @@ public class ExternalAuthService(
             Scope    = "openid profile email",
             Roles    = roles.ToArray()
         };
-        
+
         var accessToken  = await tokenService.GenerateAccessTokenAsync(tokenRequest);
         var refreshToken = await tokenService.GenerateRefreshTokenAsync(
             user.Id, client.Id, "openid profile email");
@@ -204,16 +236,18 @@ public class ExternalAuthService(
         string provider,
         string providerUserId,
         string? username,
-        string? email)
+        string? email,
+        string? avatarUrl = null)
     {
         var identity = new ExternalIdentity
         {
-            UserId            = userId,
-            Provider          = provider,
-            ProviderUserId    = providerUserId,
-            ProviderUsername  = username,
-            ProviderEmail     = email,
-            LinkedAt          = DateTime.UtcNow
+            UserId           = userId,
+            Provider         = provider,
+            ProviderUserId   = providerUserId,
+            ProviderUsername = username,
+            ProviderEmail    = email,
+            AvatarUrl        = avatarUrl,
+            LinkedAt         = DateTime.UtcNow
         };
 
         context.Set<ExternalIdentity>().Add(identity);

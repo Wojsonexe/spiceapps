@@ -55,6 +55,8 @@ services:
       dockerfile: spicehub/Dockerfile
     environment:
       BACKEND: http://localhost:8080 # Replace with proper url
+      SPICEAUTH_URL: http://spiceauth:5045 # Internal URL for server-side calls to SpiceAuth
+      NEXT_PUBLIC_SPICEAUTH_URL: http://localhost:5045 # Public URL for browser-side links to SpiceAuth
     ports:
       - "80:3000"
     depends_on:

@@ -9,14 +9,17 @@ public interface IExternalAuthService
         string providerUserId,
         string? email,
         string? username,
-        string? avatarUrl);
+        string? avatarUrl,
+        bool emailVerified = false,
+        Guid? authenticatedUserId = null);
 
     Task<bool> LinkExternalProviderAsync(
         Guid userId,
         string provider,
         string providerUserId,
         string? username = null,
-        string? email = null);
+        string? email = null,
+        string? avatarUrl = null);
 
     Task<bool> UnlinkExternalProviderAsync(Guid userId, string provider);
 
@@ -28,11 +31,14 @@ public record ExternalAuthResult(
     string? AccessToken,
     string? RefreshToken,
     string? Message,
-    UserDto? User);
+    UserDto? User,
+    string? ErrorCode = null,
+    bool WasLinked = false);
 
 public record LinkedProviderDto(
     string Provider,
     string ProviderUserId,
     string? ProviderUsername,
     string? ProviderEmail,
-    DateTime LinkedAt);
+    DateTime LinkedAt,
+    string? AvatarUrl = null);

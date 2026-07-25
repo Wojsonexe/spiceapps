@@ -20,9 +20,12 @@ public class ExternalIdentityConfiguration : IEntityTypeConfiguration<ExternalId
         
         builder.Property(e => e.ProviderUsername)
             .HasMaxLength(100);
-        
+
         builder.Property(e => e.ProviderEmail)
             .HasMaxLength(255);
+
+        builder.Property(e => e.AvatarUrl)
+            .HasMaxLength(500);
 
         // Unique constraint: one external account can be linked to only one user
         builder.HasIndex(e => new { e.Provider, e.ProviderUserId })

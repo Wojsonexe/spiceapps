@@ -55,7 +55,7 @@ public class ExternalAuthController(
         return Challenge(props, "Discord");
     }
 
-    // ── CALLBACK Discord ──────────────────────────────────────
+    // ── CALLBACK Discord ──────────────────────────────────────────────────────
     [HttpGet("discord/callback")]
     [AllowAnonymous]
     public async Task<IActionResult> DiscordCallback(
@@ -76,7 +76,9 @@ public class ExternalAuthController(
         var username       = result.Principal.FindFirstValue("urn:discord:username")
                              ?? result.Principal.FindFirstValue(ClaimTypes.Name);
         var avatarUrl      = result.Principal.FindFirstValue("urn:discord:avatar");
+        var emailVerified  = result.Principal.FindFirstValue("urn:discord:verified") == "true";
 
+        // Explicit Bearer-based link flow (initiated via GET /discord/link)
         if (link)
         {
             string? linkUserIdStr = null;
@@ -86,23 +88,42 @@ public class ExternalAuthController(
                 return BadRequest(new { error = "Nieprawidłowy userId do połączenia" });
 
             var linked = await externalAuthService.LinkExternalProviderAsync(
-                linkUserId, "discord", providerUserId, username, email);
+                linkUserId, "discord", providerUserId, username, email, avatarUrl);
 
             var status = linked ? "success" : "already_linked";
             return Redirect($"{configuration["App:FrontendUrl"]}/settings/connections?discord={status}");
         }
 
+        // Detect case 3b: cookie session (Identity.Application) — user already logged in via browser
+        Guid? authenticatedUserId = null;
+        if (HttpContext.User.Identity?.IsAuthenticated == true)
+        {
+            var uidStr = HttpContext.User.FindFirstValue(ClaimTypes.NameIdentifier)
+                         ?? HttpContext.User.FindFirstValue("sub");
+            if (Guid.TryParse(uidStr, out var uid))
+                authenticatedUserId = uid;
+        }
 
         var authResult = await externalAuthService.AuthenticateExternalAsync(
-            "discord", providerUserId, email, username, avatarUrl);
+            "discord", providerUserId, email, username, avatarUrl, emailVerified, authenticatedUserId);
+
+        var frontendUrl = configuration["App:FrontendUrl"];
 
         if (!authResult.Success)
         {
+            if (authResult.ErrorCode == "email_conflict")
+            {
+                var hint = Uri.EscapeDataString(email ?? string.Empty);
+                return Redirect($"{frontendUrl}/auth/link-required?hint={hint}");
+            }
+
             logger.LogError("External auth failed: {Message}", authResult.Message);
-            return Redirect($"{configuration["App:FrontendUrl"]}/auth/error?reason=auth_failed");
+            return Redirect($"{frontendUrl}/auth/error?reason=auth_failed");
         }
 
-        var frontendUrl = configuration["App:FrontendUrl"];
+        if (authResult.WasLinked)
+            return Redirect($"{frontendUrl}/settings/connections?discord=success");
+
         return Redirect(
             $"{frontendUrl}/auth/callback" +
             $"?access_token={authResult.AccessToken}" +

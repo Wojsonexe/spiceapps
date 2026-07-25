@@ -231,6 +231,8 @@ builder.Services.AddAuthentication()
         options.Scope.Add("email");
         options.CallbackPath = "/api/oauth/external/discord/callback";
         options.SaveTokens   = true;
+        options.CorrelationCookie.SameSite    = SameSiteMode.Lax;
+        options.CorrelationCookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
         options.Events.OnCreatingTicket = ctx =>
         {
             // Map Discord's `verified` boolean as a claim so the callback can enforce email-match rules

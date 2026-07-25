@@ -676,6 +676,21 @@ app.UseCookiePolicy(new CookiePolicyOptions
     MinimumSameSitePolicy = SameSiteMode.Lax,
     Secure = CookieSecurePolicy.SameAsRequest,
 });
+
+// TEMP DIAGNOSTIC — remove after Discord OAuth is confirmed working
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/api/oauth/external/discord"))
+    {
+        Log.Warning("🔍 [DISCORD] {Method} {Path} | Query={Query} | Cookies=[{Cookies}]",
+            context.Request.Method,
+            context.Request.Path,
+            context.Request.QueryString,
+            string.Join(", ", context.Request.Cookies.Keys));
+    }
+    await next();
+});
+
 app.UseAuthentication();
 app.UseAuthorization();
 

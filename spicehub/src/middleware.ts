@@ -8,77 +8,77 @@ import { UserInfo } from './models/User';
 export async function middleware(request: NextRequest) {
     let backend = await getBackendUrl();
     if (!backend) { console.log("backend url not set, skipping");return NextResponse.next();}
-    backend = "http://spiceapi:8080"
+    // backend = "http://spiceapi:8080"
     //console.log("Backend OK")
     const cookieStore = await cookies();
     let rt = cookieStore.get("refreshToken");
     if (!rt) return NextResponse.redirect((new URL('/login', request.url)));
 
     //console.log("RT found")
-    
+
     let at = cookieStore.get("accessToken");
     if (at) {
         //console.log("AT FOUND")
         try {
-        let res = await fetch(backend + "/api/user/getInfo", 
-            {
-                cache: 'no-store',
-                method: 'GET',
-                headers: 
+            let res = await fetch(backend + "/api/user/getInfo",
                 {
-                    Authorization: at.value,
-                }
-            });
-        if (res.status != 401)
-        {
-            const user: UserInfo = await res.json();
-            if (user.isApproved === false) 
+                    cache: 'no-store',
+                    method: 'GET',
+                    headers:
+                        {
+                            Authorization: at.value,
+                        }
+                });
+            if (res.status != 401)
             {
-                return NextResponse.redirect(new URL('/unapproved', request.url));
-            }
-            else return NextResponse.next(); 
-        }}
-        catch 
+                const user: UserInfo = await res.json();
+                if (user.isApproved === false)
+                {
+                    return NextResponse.redirect(new URL('/unapproved', request.url));
+                }
+                else return NextResponse.next();
+            }}
+        catch
         {
             return NextResponse.redirect(new URL('/maintanance?code='+encodeURI("BACKEND is offline, try again later"), request.url))
         }
     }
-    
-    try{let res = await fetch(backend+"/api/auth/generateAccess", 
+
+    try{let res = await fetch(backend+"/api/auth/generateAccess",
         {
             method: "POST",
             cache: 'no-store',
-            headers: 
-            {
-                Authorization: rt.value
-            }
+            headers:
+                {
+                    Authorization: rt.value
+                }
         })
 
-    if (res.status == 404) return NextResponse.redirect((new URL('/login', request.url)));
-    else if (res.ok) 
-    {
-        let resp = NextResponse.next()
-        resp.cookies.set("accessToken", await res.text());
-        return resp;
-    }
-    return NextResponse.redirect(new URL('/maintanance?code=impossible', request.url))
-}
-    catch 
+        if (res.status == 404) return NextResponse.redirect((new URL('/login', request.url)));
+        else if (res.ok)
         {
-            return NextResponse.redirect(new URL('/maintanance?code='+encodeURI("BACKEND is offline, try again later"), request.url))
+            let resp = NextResponse.next()
+            resp.cookies.set("accessToken", await res.text());
+            return resp;
         }
+        return NextResponse.redirect(new URL('/maintanance?code=impossible', request.url))
+    }
+    catch
+    {
+        return NextResponse.redirect(new URL('/maintanance?code='+encodeURI("BACKEND is offline, try again later"), request.url))
+    }
 }
 
 export const config = {
-  matcher: [
-    /*
-     * Match all routes except:
-     * - /login (public login page)
-     * - /api (optional: skip API routes)
-     * - /maintanance - in case of API being disabled
-     * - /register - registration page
-     * - _next (Next.js internals like static files)
-     */
-    '/((?!login|api|maintanance|unapproved|forgotPassword|logout|register|_next|favicon.ico).*)',
-  ],
+    matcher: [
+        /*
+         * Match all routes except:
+         * - /login (public login page)
+         * - /api (optional: skip API routes)
+         * - /maintanance - in case of API being disabled
+         * - /register - registration page
+         * - _next (Next.js internals like static files)
+         */
+        '/((?!login|api|maintanance|unapproved|forgotPassword|logout|register|_next|favicon.ico).*)',
+    ],
 };

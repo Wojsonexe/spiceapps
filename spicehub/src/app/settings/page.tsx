@@ -10,6 +10,7 @@ import { useTheme } from "next-themes";
 import { useState, useEffect } from "react";
 import AvatarGetSet from "./avatarGetSet";
 import { useUserData } from "@/hooks/userData";
+import ConnectionsTab from "./connectionsTab";
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -39,6 +40,7 @@ export default function SettingsPage() {
             <TabsTrigger value="account">Konto</TabsTrigger>
             <TabsTrigger value="app">Aplikacja</TabsTrigger>
             <TabsTrigger value="spicelab">Spicelab</TabsTrigger>
+            <TabsTrigger value="connections">Połączenia</TabsTrigger>
           </TabsList>
 
           <TabsContent value="profile">
@@ -97,6 +99,10 @@ export default function SettingsPage() {
             <div className="space-y-4">
 
             </div>
+          </TabsContent>
+
+          <TabsContent value="connections">
+            <ConnectionsTab />
           </TabsContent>
         </Tabs>
       </div>

@@ -56,13 +56,16 @@ public class ExternalAuthController(
     }
 
     // ── CALLBACK Discord ──────────────────────────────────────────────────────
-    [HttpGet("discord/callback")]
+    // Route intentionally differs from CallbackPath (/discord/callback) to prevent
+    // the OAuth middleware from intercepting the post-redirect request.
+    [HttpGet("discord/complete")]
     [AllowAnonymous]
     public async Task<IActionResult> DiscordCallback(
         [FromQuery] bool link = false,
         [FromQuery] string? returnUrl = null)
     {
-        var result = await HttpContext.AuthenticateAsync("Discord");
+        var result = await HttpContext.AuthenticateAsync("Identity.External");
+        await HttpContext.SignOutAsync("Identity.External");
 
         if (!result.Succeeded || result.Principal == null)
         {

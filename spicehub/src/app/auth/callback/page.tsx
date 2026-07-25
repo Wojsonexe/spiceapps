@@ -1,47 +1,42 @@
 "use client"
+import { useEffect, useRef, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { setCookie } from "typescript-cookie";
+import Loading from "@/components/Loading";
 
-import { Suspense, useEffect } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
-import { setCookie } from "typescript-cookie"
-
-function CallbackInner() {
-    const router = useRouter()
-    const params = useSearchParams()
+function AuthCallbackInner() {
+    const searchParams = useSearchParams();
+    const router = useRouter();
+    const calledRef = useRef(false);
 
     useEffect(() => {
-        const accessToken = params.get("access_token")
-        const refreshToken = params.get("refresh_token")
-
-        if (!accessToken || !refreshToken) {
-            router.replace("/login?error=discord_failed")
-            return
+        if (calledRef.current) return;
+        calledRef.current = true;
+        const accessToken  = searchParams.get("access_token");
+        const refreshToken = searchParams.get("refresh_token");
+        const error        = searchParams.get("error");
+        if (error || !accessToken || !refreshToken) {
+            router.replace("/login?error=" + (error ?? "missing_token"));
+            return;
         }
-
-        const accessExpires = new Date()
-        accessExpires.setDate(accessExpires.getDate() + 2)
-
-        setCookie("refreshToken", refreshToken, { expires: 30 })
-        setCookie("accessToken", accessToken, { expires: accessExpires })
-
-        // replace() removes the token-bearing URL from browser history
-        router.replace("/dashboard")
-    }, [params, router])
+        const accessExpiry = new Date();
+        accessExpiry.setDate(accessExpiry.getDate() + 2);
+        setCookie("accessToken",  accessToken,  { expires: accessExpiry });
+        setCookie("refreshToken", refreshToken, { expires: 30 });
+        router.replace("/dashboard");
+    }, [searchParams, router]);
 
     return (
         <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
-            <p className="text-gray-500 dark:text-gray-400 text-sm">Trwa logowanie...</p>
+            <Loading />
         </div>
-    )
+    );
 }
 
 export default function AuthCallbackPage() {
     return (
-        <Suspense fallback={
-            <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
-                <p className="text-gray-500 dark:text-gray-400 text-sm">Trwa logowanie...</p>
-            </div>
-        }>
-            <CallbackInner />
+        <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900"><Loading /></div>}>
+            <AuthCallbackInner />
         </Suspense>
-    )
+    );
 }

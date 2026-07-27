@@ -22,20 +22,25 @@ async function doRefresh(): Promise<string> {
     const rt = getCookie("refreshToken")
     if (!rt) throw new Error("Not authenticated")
 
-    const backendUrl = await getBackendUrl()
-    if (!backendUrl) throw new Error("Backend not configured")
+    const spiceauthUrl = process.env.NEXT_PUBLIC_SPICEAUTH_URL
+    if (!spiceauthUrl) throw new Error("NEXT_PUBLIC_SPICEAUTH_URL not configured")
 
-    const res = await fetch(`${backendUrl}/api/auth/generateAccess`, {
+    const res = await fetch(`${spiceauthUrl}/api/auth/refresh`, {
         method: "POST",
         cache: "no-store",
-        headers: { Authorization: rt },
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: rt }),
     })
     if (!res.ok) throw new Error("Token refresh failed")
 
-    const fresh = await res.text()
+    const data = await res.json()
+    const fresh = data.access_token as string
+    const newRt  = data.refresh_token as string
+
     const exp = new Date()
     exp.setDate(exp.getDate() + 2)
     setCookie("accessToken", fresh, { expires: exp })
+    if (newRt) setCookie("refreshToken", newRt, { expires: 30 })
     return fresh
 }
 

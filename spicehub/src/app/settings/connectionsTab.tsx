@@ -20,9 +20,14 @@ function ConnectionsContent() {
     const spiceAuthUrl = process.env.NEXT_PUBLIC_SPICEAUTH_URL ?? ""
 
     useEffect(() => {
-        if (params.get("discord") === "success") {
+        const discordStatus = params.get("discord")
+        if (discordStatus === "success") {
             toast.success("Discord połączony!", {
                 description: "Konto Discord zostało pomyślnie połączone.",
+            })
+        } else if (discordStatus === "already_linked") {
+            toast.error("Nie można połączyć Discord", {
+                description: "To konto Discord jest już przypisane do innego użytkownika.",
             })
         }
     }, [params])

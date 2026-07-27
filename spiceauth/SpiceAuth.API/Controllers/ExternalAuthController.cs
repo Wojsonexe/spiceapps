@@ -1,5 +1,6 @@
 // SpiceAuth/API/Controllers/ExternalAuthController.cs
 
+using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
@@ -27,6 +28,25 @@ public class ExternalAuthController(
             RedirectUri = redirectUri,
             Items       = { { "scheme", "Discord" } }
         };
+
+        // If the browser has a valid SpiceHub accessToken cookie, treat this as a
+        // link request so clicking "Connect Discord" doesn't switch the active account.
+        var cookieToken = Request.Cookies["accessToken"];
+        if (!string.IsNullOrEmpty(cookieToken))
+        {
+            try
+            {
+                var handler = new JwtSecurityTokenHandler();
+                var jwt = handler.ReadJwtToken(cookieToken);
+                if (jwt.ValidTo > DateTime.UtcNow)
+                {
+                    var sub = jwt.Claims.FirstOrDefault(c => c.Type == "sub")?.Value;
+                    if (!string.IsNullOrEmpty(sub))
+                        props.Items["link_userId"] = sub;
+                }
+            }
+            catch { /* malformed cookie — proceed as anonymous login */ }
+        }
 
         return Challenge(props, "Discord");
     }
@@ -81,12 +101,13 @@ public class ExternalAuthController(
         var avatarUrl      = result.Principal.FindFirstValue("urn:discord:avatar");
         var emailVerified  = result.Principal.FindFirstValue("urn:discord:verified") == "true";
 
-        // Explicit Bearer-based link flow (initiated via GET /discord/link)
-        if (link)
-        {
-            string? linkUserIdStr = null;
-            result.Properties?.Items.TryGetValue("link_userId", out linkUserIdStr);
+        // Link flow: either initiated via GET /discord/link (Bearer) or via /discord/login
+        // when the browser carried a valid accessToken cookie (cookie-based detection).
+        string? linkUserIdStr = null;
+        result.Properties?.Items.TryGetValue("link_userId", out linkUserIdStr);
 
+        if (link || !string.IsNullOrEmpty(linkUserIdStr))
+        {
             if (!Guid.TryParse(linkUserIdStr, out var linkUserId))
                 return BadRequest(new { error = "Nieprawidłowy userId do połączenia" });
 
@@ -129,8 +150,8 @@ public class ExternalAuthController(
 
         return Redirect(
             $"{frontendUrl}/auth/callback" +
-            $"?access_token={authResult.AccessToken}" +
-            $"&refresh_token={authResult.RefreshToken}");
+            $"?access_token={Uri.EscapeDataString(authResult.AccessToken!)}" +
+            $"&refresh_token={Uri.EscapeDataString(authResult.RefreshToken!)}");
     }
 
     [HttpDelete("discord/unlink")]

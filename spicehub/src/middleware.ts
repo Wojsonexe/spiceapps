@@ -31,8 +31,8 @@ export async function middleware(request: NextRequest) {
                 });
             if (res.status != 401)
             {
-                const user: UserInfo = await res.json();
-                if (user.isApproved === false)
+                const user: UserInfo & { IsApproved?: boolean } = await res.json();
+                if (user.isApproved === false || user.IsApproved === false)
                 {
                     return NextResponse.redirect(new URL('/unapproved', request.url));
                 }

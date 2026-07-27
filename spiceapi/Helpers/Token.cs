@@ -94,8 +94,31 @@ namespace SpiceAPI.Auth
                 if (string.IsNullOrWhiteSpace(sub) || !Guid.TryParse(sub, out var userId))
                     return null;
 
-                return await db.Users.Include(u => u.Roles)
+                var user = await db.Users.Include(u => u.Roles)
                     .FirstOrDefaultAsync(u => u.Id == userId);
+
+                if (user != null) return user;
+
+                // Auto-provision user from JWT claims (first login via external OAuth)
+                var email      = jwt.Claims.FirstOrDefault(c => c.Type == "email")?.Value ?? "";
+                var isApproved = jwt.Claims.FirstOrDefault(c => c.Type == "is_approved")?.Value == "true";
+                var deptRaw    = jwt.Claims.FirstOrDefault(c => c.Type == "department")?.Value;
+                var dept       = int.TryParse(deptRaw, out var d) ? (Department)d : Department.NaDr;
+
+                var provisioned = new User
+                {
+                    Id         = userId,
+                    Email      = email,
+                    IsApproved = isApproved,
+                    Department = dept,
+                    CreatedAt  = DateTime.UtcNow,
+                    LastLogin  = DateTime.UtcNow,
+                };
+
+                db.Users.Add(provisioned);
+                await db.SaveChangesAsync();
+                Log.Logger.Information("Auto-provisioned SpiceAPI user {UserId} from JWT (external OAuth)", userId);
+                return provisioned;
             }
             catch (Exception ex)
             {

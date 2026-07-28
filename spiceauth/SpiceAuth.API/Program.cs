@@ -18,6 +18,7 @@ using SpiceAuth.Core.Entities.OAuth;
 using SpiceAuth.Core.Enums;
 using AspNetCoreRateLimit;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
 using SpiceAuth.API.Middleware;
 using SpiceAuth.API.Services;
 using SpiceAuth.Application.Abstractions.Persistence;
@@ -513,7 +514,6 @@ else
     Log.Information("📍 OIDC Issuer: {Issuer}", issuerConfig);
 }
 
-var discordClientId = builder.Configuration["Discord:ClientId"];
 if (string.IsNullOrWhiteSpace(discordClientId))
     Log.Warning("⚠️  Discord:ClientId not configured — external Discord login will fail");
 
